@@ -14,7 +14,7 @@ El proyecto fuerza la versión publicada de `libsignal` mediante `overrides` por
 Actualiza los repositorios e instala Node.js, Git y FFmpeg:
 
 ```bash
-pkg update && pkg upgrade
+pkg update -y && pkg upgrade -y
 pkg install nodejs git ffmpeg
 ```
 

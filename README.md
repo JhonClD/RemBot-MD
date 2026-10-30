@@ -1,31 +1,37 @@
 # RemBot-MD
 
-Núcleo mínimo de un bot de WhatsApp basado en Baileys. Se conserva el arranque, la reconexión y el emparejamiento de la cuenta; se retiraron los comandos y funciones anteriores. **Por ahora no hay comandos instalados.** El plugin único de compresión a 360p se añadirá cuando lo proporciones.
+Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculación a WhatsApp y tiene **un solo comando**: `/dw4`, que comprime un video a 360p.
 
 ## Requisitos
 
-- Node.js `>=25` (según el `package.json` recibido).
-- FFmpeg disponible en el sistema para el futuro comando de compresión.
+- Node.js `>=25`.
+- FFmpeg con soporte H.264 (`libx264`) y AAC.
 
 ## Instalar y enlazar WhatsApp
 
 ```bash
 npm install
-npm start -- --qr
+npm run start:qr
 ```
 
-Escanea el QR desde WhatsApp → **Dispositivos vinculados** → **Vincular un dispositivo**. El bot volverá a conectar con la sesión local guardada en `Sessions/Owner/`. No compartas ni publiques esa carpeta.
+Escanea el QR desde WhatsApp → **Dispositivos vinculados** → **Vincular un dispositivo**. La sesión local se guarda en `Sessions/Owner/`; no compartas ni publiques esa carpeta.
 
-También se conserva el modo de código de vinculación del proyecto original: `npm start -- code`; este modo solicita el número en la terminal.
+## Usar `/dw4`
 
-## Configuración del propietario
+Responde al mensaje que contiene el video con:
 
-Los owners se cargan desde `BOT_OWNER_NUMBER` en `.env` local (se admiten varios números separados por comas). Ese archivo está excluido por `.gitignore`; no publiques esos números. Si no se configura, no habrá un propietario reconocido para permisos de comandos.
+```text
+/dw4
+```
 
-## Plugins
+El resultado se envía como video MP4 a 360p. Para recibirlo como documento, usa `/dw4 doc`.
 
-La carpeta `cmds/` está lista para el plugin que enviarás. El cargador importa los archivos JavaScript que se coloquen allí. Mantendremos el bot con un solo comando cuando recibamos el plugin de compresión a 360p.
+El prefijo predeterminado es `/`. Se puede cambiar con `BOT_PREFIX` en `.env`, si se desea.
 
-## Seguridad y atribución
+## Owners
 
-Las sesiones de WhatsApp, archivos `.env`, dependencias, bases locales y registros están excluidos por `.gitignore`. Se conservan la licencia MIT y los avisos de copyright originales incluidos en `LICENSE`.
+Los owners se leen desde `BOT_OWNER_NUMBER` en `.env` local; admite varios números separados por comas. `.env` está excluido por `.gitignore` y no debe publicarse.
+
+## Alcance y seguridad
+
+Se conservó únicamente el comando `/dw4`; no se importaron las demás ramas del plugin adjunto. Los videos temporales se eliminan al terminar el procesamiento. Se mantienen la licencia MIT y los avisos de copyright originales en `LICENSE`.

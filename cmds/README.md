@@ -1,3 +1,3 @@
-# Plugin único pendiente
+# Comando único
 
-Esta carpeta se dejó sin comandos antiguos. Cuando el usuario envíe el plugin de compresión a 360p, se instalará aquí como un archivo JavaScript compatible con `lib/system/cmdsloader.js`. No añadir otros comandos ni plugins.
+Esta carpeta contiene solo `dw4.js`, el comando `/dw4` para comprimir videos a 360p. No añadir los comandos restantes del plugin adjunto ni otros plugins.

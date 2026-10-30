@@ -5,7 +5,8 @@ Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculació
 ## Requisitos
 
 - Node.js `>=25`.
-- FFmpeg con soporte H.264 (`libx264`) y AAC.
+- `npm install` incluye FFmpeg mediante `ffmpeg-static` en plataformas compatibles.
+- Si no hay binario precompilado para el sistema/arquitectura, instala FFmpeg con H.264 (`libx264`) y AAC en el `PATH`.
 
 ## Instalar y enlazar WhatsApp
 

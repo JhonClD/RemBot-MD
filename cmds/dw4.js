@@ -4,8 +4,10 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { downloadContentFromMessage } from 'baileys';
+import ffmpegStatic from 'ffmpeg-static';
 
 const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000;
+const FFMPEG_BIN = ffmpegStatic || 'ffmpeg';
 const activeChats = new Set();
 const VIDEO_EXTENSIONS = /\.(mp4|m4v|mkv|mov|webm|avi|3gp)$/i;
 
@@ -24,7 +26,7 @@ export function compressDw4(inputPath, outputPath, { timeoutMs = FFMPEG_TIMEOUT_
   ];
 
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const ffmpeg = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     let settled = false;
     const finish = (callback, value) => {

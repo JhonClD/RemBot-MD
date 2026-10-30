@@ -32,8 +32,8 @@ La versión de Node.js debe ser `25` o superior. Si `node --version` muestra una
 ## Instalar y enlazar WhatsApp en Termux
 
 ```bash
-pkg install ffmpeg
-ffmpeg -version
+git clone https://github.com/JhonClD/RemBot-MD.git
+cd RemBot-MD
 npm install
 npm run start:qr
 ```

@@ -35,5 +35,10 @@
     "pino": "^9.6.0",
     "qrcode-terminal": "^0.12.0",
     "readline-sync": "^1.4.10"
+  },
+  "overrides": {
+    "baileys": {
+      "libsignal": "npm:libsignal@6.0.0"
+    }
   }
 }

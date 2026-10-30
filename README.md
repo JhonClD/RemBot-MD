@@ -5,15 +5,18 @@ Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculació
 ## Requisitos
 
 - Node.js `>=25`.
-- `npm install` incluye FFmpeg mediante `ffmpeg-static` en plataformas compatibles.
-- Si no hay binario precompilado para el sistema/arquitectura, instala FFmpeg con H.264 (`libx264`) y AAC en el `PATH`.
+- FFmpeg instalado en Termux y accesible como `ffmpeg` en `PATH`.
 
-## Instalar y enlazar WhatsApp
+## Instalar y enlazar WhatsApp en Termux
 
 ```bash
+pkg install ffmpeg
+ffmpeg -version
 npm install
 npm run start:qr
 ```
+
+`/dw4` ejecuta el FFmpeg del sistema; no se descarga ni se incluye un binario FFmpeg en `package.json`. Si el ejecutable no se llama `ffmpeg` o no está en `PATH`, configura `FFMPEG_PATH` con la ruta al binario.
 
 Escanea el QR desde WhatsApp → **Dispositivos vinculados** → **Vincular un dispositivo**. La sesión local se guarda en `Sessions/Owner/`; no compartas ni publiques esa carpeta.
 

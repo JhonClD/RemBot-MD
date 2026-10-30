@@ -5,11 +5,10 @@ import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { createInterface } from 'node:readline';
 import { downloadContentFromMessage } from 'baileys';
-import ffmpegStatic from 'ffmpeg-static';
 
 const FFMPEG_TIMEOUT_MS = 20 * 60 * 1000;
 const PROGRESS_LOG_INTERVAL_MS = 1000;
-const FFMPEG_BIN = ffmpegStatic || 'ffmpeg';
+const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg';
 const activeChats = new Set();
 const VIDEO_EXTENSIONS = /\.(mp4|m4v|mkv|mov|webm|avi|3gp)$/i;
 

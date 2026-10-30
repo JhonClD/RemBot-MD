@@ -1,6 +1,5 @@
 import "./settings.js";
 import handler from '#handler';
-import events from '#events';
 import makeWASocket, { Browsers, makeCacheableSignalKeyStore, useMultiFileAuthState, fetchLatestBaileysVersion, jidDecode, DisconnectReason } from 'baileys';
 import pino from "pino";
 import qrcode from "qrcode-terminal";
@@ -10,9 +9,6 @@ import path from "path";
 import readlineSync from "readline-sync";
 import { smsg, deleteCachedMeta } from "#serialize";
 import cmdsLoader from '#cmdsloader';
-import "#db";
-import { startSubBot } from '#subs';
-import db from '#db';
 
 const log = {
   info: (msg) => console.log(chalk.bgBlue.white.bold(` INFO `), chalk.white(msg)),
@@ -38,52 +34,13 @@ function normalizePhone(input) {
 
 console.log(chalk.blue.bold('\n INICIANDO SISTEMA ...'))
 console.log(chalk.cyan(`
-      Stellar | Wa Bot
-     Powered by I'm Diego ~
+      RemBot-MD | WhatsApp
+       Núcleo de conexión
 `))
 
-const BOT_TYPES = [
-  { name: 'SubBot', folder: './Sessions/Subs', starter: startSubBot }
-]
-
 if (!fs.existsSync('./lib/system/tmp')) fs.mkdirSync('./lib/system/tmp', { recursive: true });
-global.conns = global.conns || [];
-const reconnecting = new Set();
 const msgStore = new Map();
 const msgLimit = 500;
-
-async function loadBots() {
-  for (const { name, folder, starter } of BOT_TYPES) {
-    if (!fs.existsSync(folder)) continue;
-    const botIds = fs.readdirSync(folder);
-    for (const userId of botIds) {
-      const sessionPath = path.join(folder, userId);
-      const credsPath = path.join(sessionPath, 'creds.json');
-      if (!fs.existsSync(credsPath)) continue;
-      if (global.conns.some((conn) => conn.userId === userId)) continue;
-      if (reconnecting.has(userId)) continue;
-      try {
-        reconnecting.add(userId);
-        await starter(null, null, '', false, userId, '');
-      } catch (e) {
-        console.log(chalk.gray(`[ loadBots ] Error iniciando ${name} ${userId}: ${e?.message || e}`));
-        reconnecting.delete(userId);
-      }
-      await new Promise((res) => setTimeout(res, 2500));
-    }
-  }
-  setTimeout(loadBots, 60 * 1000);
-}
-
-async function initDB() {
-  try {
-  db.initDB();
-  // db.clearDB();
-  log.info('Base de datos cargada correctamente.');
-  } catch (e) {
-  log.error('La Base de datos no fué cargada.');
-   }
-}
 
 function clearSession() {
   try {
@@ -211,18 +168,14 @@ export async function startBot() {
     }
   });
 
-  try { await events(sock, null); } catch (err) { console.log(chalk.gray(`[ EVENT ERROR ] → ${err}`)); }
-
   sock.ev.on("group-participants.update", ({ id }) => { deleteCachedMeta(id); });
   sock.ev.on("groups.update", (updates) => { for (const update of updates) deleteCachedMeta(update.id); });
 
   sock.ev.on("connection.update", async (update) => {
     const { qr, connection, lastDisconnect, isNewLogin, receivedPendingNotifications } = update;
-    if (qr != 0 && qr != undefined || methodCodeQR) {
-      if (opcion == '1' || methodCodeQR) {
-        console.log(chalk.green.bold("[ ✿ ] Escanea este código QR"));
-        qrcode.generate(qr, { small: true });
-      }
+    if (qr && (opcion === '1' || methodCodeQR)) {
+      console.log(chalk.green.bold("[ ✿ ] Escanea este código QR"));
+      qrcode.generate(qr, { small: true });
     }
     if (connection === "open") {
 
@@ -279,8 +232,6 @@ export async function startBot() {
 }
 
 (async () => {
-  await initDB();
   await cmdsLoader();
-  loadBots();
   await startBot();
 })();

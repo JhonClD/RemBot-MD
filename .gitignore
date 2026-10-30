@@ -7,3 +7,6 @@ session/
 auth_info_baileys/
 *.log
 *.db
+database.json
+*.sqlite
+lib/system/tmp/*

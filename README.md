@@ -9,6 +9,26 @@ Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculació
 
 El proyecto fuerza la versión publicada de `libsignal` mediante `overrides` porque el fork de Baileys intenta cargar un binding nativo Android ARM64 que no está publicado en npm. Esto evita el error `Cannot find native binding` al instalar y ejecutar el bot en Termux.
 
+## Dependencias de Termux
+
+Actualiza los repositorios e instala Node.js, Git y FFmpeg:
+
+```bash
+pkg update && pkg upgrade
+pkg install nodejs git ffmpeg
+```
+
+Comprueba que las versiones cumplen los requisitos del proyecto:
+
+```bash
+node --version
+npm --version
+ffmpeg -version
+git --version
+```
+
+La versión de Node.js debe ser `25` o superior. Si `node --version` muestra una versión anterior, actualiza los paquetes de Termux antes de continuar. Si Termux no encuentra `ffmpeg`, comprueba su ruta con `command -v ffmpeg` y configura `FFMPEG_PATH` en el archivo `.env`.
+
 ## Instalar y enlazar WhatsApp en Termux
 
 ```bash

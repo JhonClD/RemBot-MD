@@ -29,6 +29,16 @@ git --version
 
 La versión de Node.js debe ser `25` o superior. Si `node --version` muestra una versión anterior, actualiza los paquetes de Termux antes de continuar. Si Termux no encuentra `ffmpeg`, comprueba su ruta con `command -v ffmpeg` y configura `FFMPEG_PATH` en el archivo `.env`.
 
+## Permiso de almacenamiento
+
+Para permitir que Termux acceda al almacenamiento compartido de Android, ejecuta:
+
+```bash
+termux-setup-storage
+```
+
+Acepta el permiso cuando Android lo solicite. Esto crea el acceso `~/storage/`, incluyendo rutas como `~/storage/shared/` para los archivos del teléfono. El bot guarda su sesión y sus archivos temporales dentro de su propia carpeta, pero este permiso es necesario si vas a copiar vídeos desde el almacenamiento compartido o guardar resultados allí.
+
 ## Instalar y enlazar WhatsApp en Termux
 
 ```bash

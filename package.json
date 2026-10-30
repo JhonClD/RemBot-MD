@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "axios": "^1.8.4",
-    "baileys": "https://github.com/this-xys/bails/archive/b2082017b893edeab28ed1b7b32e8d7747d6c40d.tar.gz",
+    "baileys": "7.0.0-rc14",
     "chalk": "^5.4.1",
     "dotenv": "^16.4.7",
     "fluent-ffmpeg": "^2.1.3",
@@ -35,10 +35,5 @@
     "pino": "^9.6.0",
     "qrcode-terminal": "^0.12.0",
     "readline-sync": "^1.4.10"
-  },
-  "overrides": {
-    "baileys": {
-      "libsignal": "npm:libsignal@6.0.0"
-    }
   }
 }

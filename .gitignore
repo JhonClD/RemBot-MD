@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+node_modules/
+Sessions/
+session/
+auth_info_baileys/
+*.log
+*.db

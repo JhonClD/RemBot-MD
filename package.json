@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "axios": "^1.8.4",
-    "baileys": "github:this-xys/bails",
+    "baileys": "https://github.com/this-xys/bails/archive/b2082017b893edeab28ed1b7b32e8d7747d6c40d.tar.gz",
     "chalk": "^5.4.1",
     "dotenv": "^16.4.7",
     "fluent-ffmpeg": "^2.1.3",

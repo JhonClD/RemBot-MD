@@ -35,7 +35,7 @@ La versión de Node.js debe ser `25` o superior. Si `node --version` muestra una
 git clone https://github.com/JhonClD/RemBot-MD.git
 cd RemBot-MD
 npm install
-npm run start:qr
+npm start
 ```
 
 `/dw4` ejecuta el FFmpeg del sistema; no se descarga ni se incluye un binario FFmpeg en `package.json`. Si el ejecutable no se llama `ffmpeg` o no está en `PATH`, configura `FFMPEG_PATH` con la ruta al binario.

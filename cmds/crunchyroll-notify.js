@@ -429,7 +429,22 @@ async function fetchBrowseEpisodes() {
   })
 
   const allowed = new Set(['ja-JP', 'es-419', 'es-LA', 'es-ES'])
-  return [...new Map(rows.map(normalizeEpisode).filter((episode) => episode.id && episode.series && allowed.has(episode.audioLocale)).map((episode) => [episode.id, episode])).values()]
+  const normalized = rows.map(normalizeEpisode)
+  const accepted = []
+  for (const episode of normalized) {
+    if (!episode.id || !episode.series) {
+      console.log(`[CR-Notify] Descartado: datos incompletos | ID: ${episode.id || '(vacío)'} | Serie: ${episode.series || '(vacía)'}`)
+      continue
+    }
+    if (!allowed.has(episode.audioLocale)) {
+      console.log(`[CR-Notify] Descartado por idioma: ${episode.audioLocale || '(vacío)'} | ${episode.series} | ${episode.id}`)
+      continue
+    }
+    accepted.push(episode)
+  }
+  const unique = [...new Map(accepted.map((episode) => [episode.id, episode])).values()]
+  console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados`)
+  return unique
 }
 
 async function fetchLatest() {
@@ -444,14 +459,19 @@ async function fetchLatest() {
 
 async function fetchNew() {
   const current = await fetchLatest()
-  if (!current.length) return []
+  if (!current.length) {
+    console.log('[CR-Notify] Revisión: no se encontraron episodios válidos.')
+    return []
+  }
   const seen = loadSeen()
   if (!seen.length) {
     saveSeen(current.map((episode) => episode.id))
     console.log(`[CR-Notify] Caché inicial sembrado con ${current.length} episodios.`)
     return []
   }
-  return current.filter((episode) => !seen.includes(episode.id))
+  const fresh = current.filter((episode) => !seen.includes(episode.id))
+  console.log(`[CR-Notify] Revisión: ${current.length} válidos | ${fresh.length} nuevos | ${seen.length} registrados.`)
+  return fresh
 }
 
 function markSeen(id) {
@@ -510,13 +530,19 @@ function startCron(sock) {
   const minutes = Math.max(1, Math.floor(Number(minutesRaw) || 1))
   runtime.cronTimer = setInterval(() => checkAndSend(getSock(), false).catch((error) => console.error('[CR-Notify] Cron:', error.message)), minutes * 60_000)
   runtime.cronTimer.unref?.()
-  console.log(`[CR-Notify] Monitoreo activo cada ${minutes} min. Grupos: ${(cfg.targetJids || []).length}.`)
+  console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${(cfg.targetJids || []).length} grupo(s) configurado(s)`)
+  console.log(`[CR-Notify] Auto-inicio | Grupos: ${(cfg.targetJids || []).length} | Modo: ${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'} | Cron: ON`)
+  console.log(`[CR-Notify] Delays → JID: ${SEND_JID_DELAY_MS}ms | Ep: ${SEND_DELAY_MS}ms | Browse: ${BROWSE_TIMEOUT_MS}ms`)
 }
 
 async function checkAndSend(sock, manual = false) {
   if (runtime.cronRunning || !sock) return 0
   const jids = loadCfg().targetJids || []
-  if (!jids.length) return 0
+  if (!jids.length) {
+    if (manual) console.log('[CR-Notify] Revisión manual omitida: no hay grupos configurados.')
+    return 0
+  }
+  console.log(`[CR-Notify] Revisión ${manual ? 'manual' : 'programada'} iniciada | Grupos: ${jids.length}`)
   runtime.cronRunning = true
   try {
     return await withLock(async () => {

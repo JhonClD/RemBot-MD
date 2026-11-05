@@ -19,6 +19,7 @@ const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; s
 const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
 const SEND_DELAY_MS = envNum('CR_SEND_DELAY_MS', 1000)
 const BROWSE_TIMEOUT_MS = envNum('CR_BROWSE_TIMEOUT_MS', 20000, 1000)
+const MAX_EPISODE_AGE_DAYS = envNum('CR_MAX_AGE_DAYS', 30, 1)
 const HEALTH_INTERVAL_MS = 30 * 60_000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
@@ -362,6 +363,8 @@ function normalizeEpisode(item) {
   if (season && series && !series.includes(season) && !season.startsWith(series)) series += ` ${season}`
   const id = item?.id || ''
   const slug = item?.slug_title || meta.slug_title || ''
+  const airRaw = item?.episode_air_date || meta.episode_air_date || item?.premium_available_date || item?.availability_starts || ''
+  const parsedAirTime = airRaw ? Date.parse(airRaw) : 0
   return {
     id,
     series: series.trim(),
@@ -369,7 +372,7 @@ function normalizeEpisode(item) {
     epNum,
     audioLocale: locale,
     image: extractImage(item?.images),
-    airTime: item?.premium_available_date || item?.availability_starts || '',
+    airTime: Number.isFinite(parsedAirTime) ? parsedAirTime : 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
   }
 }
@@ -397,7 +400,7 @@ function parseRss(xml) {
       audioLocale: 'ja-JP',
       image,
       link,
-      airTime: tag('pubDate'),
+      airTime: Date.parse(tag('pubDate')) || 0,
     })
   }
   return episodes
@@ -440,10 +443,17 @@ async function fetchBrowseEpisodes() {
       console.log(`[CR-Notify] Descartado por idioma: ${episode.audioLocale || '(vacío)'} | ${episode.series} | ${episode.id}`)
       continue
     }
+    if (episode.airTime) {
+      const ageDays = (Date.now() - episode.airTime) / (1000 * 60 * 60 * 24)
+      if (ageDays > MAX_EPISODE_AGE_DAYS) {
+        console.log(`[CR-Notify] Descartado por antigüedad: ${Math.floor(ageDays)} días | máximo ${MAX_EPISODE_AGE_DAYS} | ${episode.series} | ${episode.id}`)
+        continue
+      }
+    }
     accepted.push(episode)
   }
   const unique = [...new Map(accepted.map((episode) => [episode.id, episode])).values()]
-  console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados`)
+  console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados | Edad máxima: ${MAX_EPISODE_AGE_DAYS} días`)
   return unique
 }
 
@@ -533,6 +543,7 @@ function startCron(sock) {
   console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${(cfg.targetJids || []).length} grupo(s) configurado(s)`)
   console.log(`[CR-Notify] Auto-inicio | Grupos: ${(cfg.targetJids || []).length} | Modo: ${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'} | Cron: ON`)
   console.log(`[CR-Notify] Delays → JID: ${SEND_JID_DELAY_MS}ms | Ep: ${SEND_DELAY_MS}ms | Browse: ${BROWSE_TIMEOUT_MS}ms`)
+  console.log(`[CR-Notify] Filtro de antigüedad → máximo ${MAX_EPISODE_AGE_DAYS} días | Fecha: episode_air_date`)
 }
 
 async function checkAndSend(sock, manual = false) {
@@ -653,6 +664,7 @@ async function runStatus({ msg }) {
     `⏳ Token expira: *${exp}*\n` +
     `🔁 Refresh token: *${cfg.refreshToken ? 'Sí' : 'No'}*\n` +
     `⏱️ Cron: cada *${minutes} min*\n` +
+    `📅 Edad máxima: *${MAX_EPISODE_AGE_DAYS} días* (episode_air_date)\n` +
     `🔄 Cron activo: *${runtime.cronTimer ? 'Sí' : (cfg.cronDisabled ? 'Detenido' : 'No')}*\n` +
     `💾 Episodios registrados: *${seen.length}*\n` +
     `🔐 Credenciales: *${runtime.credentialCache.source}*\n\n` +

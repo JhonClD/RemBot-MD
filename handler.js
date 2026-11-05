@@ -8,9 +8,21 @@ export default async function handler(sock, msg) {
   const cmdData = global.comandos?.get(command);
   if (!cmdData) return;
 
-  const owners = (global.owner || []).map((number) => `${number}@s.whatsapp.net`);
+  const ownerNumbers = (global.owner || []).map((number) => String(number).replace(/\D/g, '')).filter(Boolean);
+  const ownerLids = String(process.env.BOT_OWNER_LID || '')
+    .split(',')
+    .map((number) => number.replace(/\D/g, ''))
+    .filter(Boolean);
+  const owners = ownerNumbers.map((number) => `${number}@s.whatsapp.net`);
   const sender = msg.sender || '';
-  const isOwner = owners.includes(sender);
+  const senderCandidates = [
+    sender,
+    msg.key?.participant,
+    msg.key?.remoteJid,
+  ].filter(Boolean);
+  const senderBases = senderCandidates.map((jid) => String(jid).split('@')[0].split(':')[0]);
+  const isOwner = owners.includes(sender)
+    || senderBases.some((base) => ownerNumbers.includes(base) || ownerLids.includes(base));
   if (cmdData.isOwner && !isOwner) return;
 
   let groupMetadata = null;

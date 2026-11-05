@@ -23,6 +23,7 @@ const HEALTH_INTERVAL_MS = 30 * 60_000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
 const COOKIE_TTL_MS = 6 * 60 * 60_000
+const CR_PREFIX = (process.env.BOT_PREFIX || '`').trim().split(/\s+/)[0] || '`'
 
 fs.mkdirSync(TMP_DIR, { recursive: true })
 try { fs.chmodSync(TMP_DIR, 0o700) } catch {}
@@ -266,7 +267,7 @@ async function loginWithAccount(email, password) {
 
 async function refreshAccountToken() {
   const cfg = loadCfg()
-  if (!cfg.refreshToken) throw new Error('Sin refresh token; usa /crlogin nuevamente.')
+  if (!cfg.refreshToken) throw new Error(`Sin refresh token; usa ${CR_PREFIX}crlogin nuevamente.`)
   await preLogin()
   const response = await fetch(CR_AUTH, {
     method: 'POST',
@@ -558,15 +559,15 @@ function canManageGroup(msg, sock, isOwner) {
 }
 
 function usage(command = 'crnotify') {
-  return `Uso: /${command} [1-50]` 
+  return `Uso: ${CR_PREFIX}${command} [1-50]`
 }
 
 async function runLogin({ msg, sock, args, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño puede iniciar sesión en Crunchyroll.')
-  if (msg.isGroup) return msg.reply('⛔ Usa /crlogin únicamente por privado.')
+  if (msg.isGroup) return msg.reply(`⛔ Usa ${CR_PREFIX}crlogin únicamente por privado.`)
   const email = args[0]
   const password = args.slice(1).join(' ')
-  if (!email || !password) return msg.reply('💡 Uso: /crlogin correo contraseña')
+  if (!email || !password) return msg.reply(`💡 Uso: ${CR_PREFIX}crlogin correo contraseña`)
   await msg.delete?.().catch(() => {})
   await msg.react?.('⏳').catch(() => {})
   try {
@@ -616,7 +617,7 @@ async function runStatus({ msg }) {
   const seen = loadSeen()
   const minutes = Math.max(1, Math.floor(Number(process.env.CR_MINUTES || cfg.minutes || 1) || 1))
   const exp = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
-  const groups = cfg.targetJids.length ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${jid}`).join('\n') : '  Ninguno — usa /crset'
+  const groups = cfg.targetJids.length ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${jid}`).join('\n') : `  Ninguno — usa ${CR_PREFIX}crset`
   return msg.reply(
     `📊 *CR-Notify Status*\n\n` +
     `🔑 Modo: *${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'}*\n` +
@@ -678,7 +679,7 @@ async function runStop({ msg, isOwner }) {
   cfg.cronDisabled = true
   saveCfg(cfg)
   stopCron()
-  return msg.reply('🛑 Cron detenido. Usa /crstart para reanudarlo.')
+  return msg.reply(`🛑 Cron detenido. Usa ${CR_PREFIX}crstart para reanudarlo.`)
 }
 
 async function runStart({ msg, sock, isOwner }) {

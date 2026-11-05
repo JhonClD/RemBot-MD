@@ -502,12 +502,15 @@ function startCron(sock) {
   if (sock) runtime.storedSock = sock
   stopCron()
   const cfg = loadCfg()
-  if (cfg.cronDisabled) return
+  if (cfg.cronDisabled) {
+    console.log('[CR-Notify] Monitoreo detenido por configuración. Usa `crstart para reanudarlo.')
+    return
+  }
   const minutesRaw = process.env.CR_MINUTES || cfg.minutes || 1
   const minutes = Math.max(1, Math.floor(Number(minutesRaw) || 1))
   runtime.cronTimer = setInterval(() => checkAndSend(getSock(), false).catch((error) => console.error('[CR-Notify] Cron:', error.message)), minutes * 60_000)
   runtime.cronTimer.unref?.()
-  console.log(`[CR-Notify] Cron activo cada ${minutes} min. Grupos: ${(cfg.targetJids || []).length}.`)
+  console.log(`[CR-Notify] Monitoreo activo cada ${minutes} min. Grupos: ${(cfg.targetJids || []).length}.`)
 }
 
 async function checkAndSend(sock, manual = false) {
@@ -739,3 +742,16 @@ export default {
   description: 'Notificador de estrenos de Crunchyroll con API y RSS de respaldo.',
   run: runCommand,
 }
+
+console.log('[CR-Notify] Plugin cargado. Esperando la conexión de WhatsApp...')
+let autoStartAttempts = 0
+const autoStartTimer = setInterval(() => {
+  autoStartAttempts++
+  const sock = getSock()
+  if (sock || autoStartAttempts >= 30) {
+    clearInterval(autoStartTimer)
+    if (sock) startCron(sock)
+    else console.warn('[CR-Notify] WhatsApp todavía no está conectado; usa `crstart después de conectar.')
+  }
+}, 1000)
+autoStartTimer.unref?.()

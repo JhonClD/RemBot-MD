@@ -10,7 +10,6 @@ const MAX_SEEN = 500
 const CR_BASE = 'https://www.crunchyroll.com'
 const CR_BETA = 'https://beta-api.crunchyroll.com'
 const CR_AUTH = `${CR_BASE}/auth/v1/token`
-const CR_RSS = 'https://feeds.feedburner.com/crunchyroll/rss/anime'
 const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextractor/refs/heads/main/credentials.tv.json'
 const BASIC_ANON_FALLBACK = 'Basic bmR0aTZicXlqcm9wNXZnZjF0dnU6elpIcS00SEJJVDlDb2FMcnBPREJjRVRCTUNHai1QNlg='
 const BASIC_AUTH_FALLBACK = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
@@ -374,43 +373,6 @@ function normalizeEpisode(item) {
   }
 }
 
-function stripCdata(value) {
-  return value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim()
-}
-
-function parseRss(xml) {
-  const episodes = []
-  for (const match of xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)) {
-    const block = match[1]
-    const tag = (name) => stripCdata(block.match(new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, 'i'))?.[1] || '')
-    const title = tag('title')
-    const link = tag('link') || block.match(/<link\b[^>]*href="([^"]+)"/i)?.[1] || ''
-    const guid = tag('guid')
-    const id = link.match(/\/watch\/([^/\s?#]+)/)?.[1] || guid
-    const number = title.match(/(?:Episode|Ep\.?|E)\s*(\d+)/i)?.[1]
-    const image = block.match(/<media:thumbnail\b[^>]*url="([^"]+)"/i)?.[1] || ''
-    if (id && title && link) episodes.push({
-      id,
-      series: title.replace(/\s*(?:Episode|Ep\.?|E)\s*\d+.*$/i, '').trim() || title,
-      epTitle: '',
-      epNum: number ? Number(number) : 'Especial',
-      audioLocale: 'ja-JP',
-      image,
-      link,
-      airTime: tag('pubDate'),
-    })
-  }
-  return episodes
-}
-
-async function fetchRssEpisodes() {
-  const response = await fetch(CR_RSS, { headers: { Accept: 'application/rss+xml, application/xml', 'User-Agent': runtime.userAgent }, signal: AbortSignal.timeout(15_000) })
-  if (!response.ok) throw new Error(`RSS HTTP ${response.status}`)
-  const xml = await response.text()
-  if (xml.length > 2 * 1024 * 1024) throw new Error('RSS demasiado grande')
-  return parseRss(xml)
-}
-
 async function fetchBrowseEpisodes() {
   const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 1, 1)))
   const responses = await Promise.allSettled(Array.from({ length: pageCount }, (_, index) => crFetch('/content/v2/discover/browse', {
@@ -448,13 +410,7 @@ async function fetchBrowseEpisodes() {
 }
 
 async function fetchLatest() {
-  try {
-    const episodes = await fetchBrowseEpisodes()
-    if (episodes.length) return episodes
-  } catch (error) {
-    console.warn(`[CR-Notify] Browse falló: ${error.message}. Probando RSS.`)
-  }
-  return fetchRssEpisodes()
+  return fetchBrowseEpisodes()
 }
 
 async function fetchNew() {
@@ -736,10 +692,10 @@ async function runDiag({ msg, isOwner }) {
       lines.push(`❎ Auth anónima: *FALLÓ* — ${error.message}`)
     }
     try {
-      const rss = await fetchRssEpisodes()
-      lines.push(`📰 RSS: *OK* (${rss.length} ítems)`)
+      const episodes = await fetchBrowseEpisodes()
+      lines.push(`📚 API Browse: *OK* (${episodes.length} episodios)`)
     } catch (error) {
-      lines.push(`❎ RSS: *FALLÓ* — ${error.message}`)
+      lines.push(`❎ API Browse: *FALLÓ* — ${error.message}`)
     }
   } catch (error) {
     lines.push(`❎ Error general: ${error.message}`)
@@ -765,7 +721,7 @@ async function runCommand({ msg, sock, command, args, isOwner }) {
 export default {
   command: ['crlogin', 'crlogout', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify', 'crstop', 'crstart', 'crdiag'],
   category: 'anime',
-  description: 'Notificador de estrenos de Crunchyroll con API y RSS de respaldo.',
+  description: 'Notificador de estrenos de Crunchyroll mediante la API.',
   run: runCommand,
 }
 

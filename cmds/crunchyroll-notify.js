@@ -482,7 +482,7 @@ function startCron(sock) {
     console.log('[CR-Notify] Monitoreo detenido por configuración. Usa `crstart para reanudarlo.')
     return
   }
-  const minutesRaw = process.env.CR_MINUTES || cfg.minutes || 1
+  const minutesRaw = cfg.minutes || process.env.CR_MINUTES || 1
   const minutes = Math.max(1, Math.floor(Number(minutesRaw) || 1))
   runtime.cronTimer = setInterval(() => checkAndSend(getSock(), false).catch((error) => console.error('[CR-Notify] Cron:', error.message)), minutes * 60_000)
   runtime.cronTimer.unref?.()
@@ -600,7 +600,7 @@ async function runRemove({ msg, sock, isOwner }) {
 async function runStatus({ msg }) {
   const cfg = loadCfg()
   const seen = loadSeen()
-  const minutes = Math.max(1, Math.floor(Number(process.env.CR_MINUTES || cfg.minutes || 1) || 1))
+  const minutes = Math.max(1, Math.floor(Number(cfg.minutes || process.env.CR_MINUTES || 1) || 1))
   const exp = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
   const groups = cfg.targetJids.length ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${jid}`).join('\n') : `  Ninguno — usa ${CR_PREFIX}crset`
   return msg.reply(
@@ -676,6 +676,23 @@ async function runStart({ msg, sock, isOwner }) {
   return msg.reply('▶️ Cron iniciado.')
 }
 
+async function runInterval({ msg, sock, args, isOwner }) {
+  if (!isOwner) return msg.reply('⛔ Solo el dueño puede cambiar el intervalo global.')
+  const raw = args[0]
+  if (raw === undefined) return msg.reply(`Uso: ${CR_PREFIX}crinterval [1-1440] minutos`)
+  const minutes = Number(raw)
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+    return msg.reply('⛔ Intervalo no válido. Usa un número entero de 1 a 1440 minutos.')
+  }
+  const cfg = loadCfg()
+  cfg.minutes = minutes
+  saveCfg(cfg)
+  if (!cfg.cronDisabled) startCron(sock)
+  return msg.reply(cfg.cronDisabled
+    ? `✅ Intervalo guardado: cada ${minutes} min. El cron sigue detenido; usa ${CR_PREFIX}crstart para iniciarlo.`
+    : `✅ Intervalo actualizado: cada ${minutes} min.`)
+}
+
 async function runDiag({ msg, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño.')
   await msg.react?.('⏳').catch(() => {})
@@ -715,11 +732,12 @@ async function runCommand({ msg, sock, command, args, isOwner }) {
   if (command === 'crnotify') return runNotify({ msg, sock, args, isOwner })
   if (command === 'crstop') return runStop({ msg, isOwner })
   if (command === 'crstart') return runStart({ msg, sock, isOwner })
+  if (command === 'crinterval') return runInterval({ msg, sock, args, isOwner })
   if (command === 'crdiag') return runDiag({ msg, isOwner })
 }
 
 export default {
-  command: ['crlogin', 'crlogout', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify', 'crstop', 'crstart', 'crdiag'],
+  command: ['crlogin', 'crlogout', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify', 'crstop', 'crstart', 'crinterval', 'crdiag'],
   category: 'anime',
   description: 'Notificador de estrenos de Crunchyroll mediante la API.',
   run: runCommand,

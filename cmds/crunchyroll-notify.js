@@ -22,6 +22,8 @@ const ENV_BASIC_ANON = (process.env.CR_BASIC_ANON || NX_BASIC).trim()
 const ENV_BASIC_AUTH = (process.env.CR_BASIC_AUTH || NX_BASIC).trim()
 const ENV_USER_AGENT = (process.env.CR_USER_AGENT || NX_UA).trim().replace(/[\u0000-\u001f\u007f]/g, '')
 
+const TITLE_LOCALE = /^[a-z]{2}-[A-Za-z0-9]{2,4}$/.test((process.env.CR_LOCALE || '').trim()) ? process.env.CR_LOCALE.trim() : 'ja-JP'
+
 const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
 const SEND_DELAY_MS = envNum('CR_SEND_DELAY_MS', 1000)
 const BROWSE_TIMEOUT_MS = envNum('CR_BROWSE_TIMEOUT_MS', 20000, 1000)
@@ -259,8 +261,11 @@ async function loginWithEtpRt(etpRt) {
     signal: AbortSignal.timeout(20_000),
   })
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}))
-    throw new Error(error.error_description || error.error || `HTTP ${response.status}`)
+    const raw = await response.text().catch(() => '')
+    let error = {}
+    try { error = JSON.parse(raw) } catch {}
+    const blocked = /cloudflare|cf-ray|just a moment|<html/i.test(raw) || response.headers.has('cf-ray')
+    throw new Error(error.error_description || error.error || `HTTP ${response.status}${blocked ? ' (bloqueo de Cloudflare, no es la cookie)' : `: ${raw.slice(0, 120)}`}`)
   }
   const data = await response.json()
   if (!data.access_token) throw new Error('respuesta sin access_token')
@@ -469,7 +474,7 @@ async function fetchBrowseEpisodes() {
     start: index * 100,
     sort_by: 'newly_added',
     type: 'episode',
-    locale: 'es-419',
+    locale: TITLE_LOCALE,
   }, CR_BETA, BROWSE_TIMEOUT_MS)))
 
   const rows = []

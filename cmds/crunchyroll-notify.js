@@ -14,6 +14,13 @@ const CREDENTIALS_URL = 'https://raw.githubusercontent.com/vitalygashkov/crextra
 const BASIC_ANON_FALLBACK = 'Basic bmR0aTZicXlqcm9wNXZnZjF0dnU6elpIcS00SEJJVDlDb2FMcnBPREJjRVRCTUNHai1QNlg='
 const BASIC_AUTH_FALLBACK = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI='
 const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; sdk_gphone64_x86_64)'
+const NX_BASIC = 'Basic ZXI5bmdnMmtvNW9oaXJsYTUxaTI6VmwxVDBQbjhRWko2d3o0NnhYRGxIekRGUDV0Wlgxb3E='
+const NX_UA = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 12; en-US; SHIELD Android TV Build/SR1A.220624.014)'
+const WEB_BASIC = 'Basic bm9haWhkZXZtXzZpeWcwYThsMHE6'
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+const ENV_BASIC_ANON = (process.env.CR_BASIC_ANON || NX_BASIC).trim()
+const ENV_BASIC_AUTH = (process.env.CR_BASIC_AUTH || NX_BASIC).trim()
+const ENV_USER_AGENT = (process.env.CR_USER_AGENT || NX_UA).trim().replace(/[\u0000-\u001f\u007f]/g, '')
 
 const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
 const SEND_DELAY_MS = envNum('CR_SEND_DELAY_MS', 1000)
@@ -45,11 +52,13 @@ const runtime = globalThis.__rembotCrunchyrollNotify ??= {
   cookiesExp: 0,
   basicAnon: BASIC_ANON_FALLBACK,
   basicAuth: BASIC_AUTH_FALLBACK,
-  userAgent: CR_UA_FALLBACK,
+  userAgent: ENV_USER_AGENT || CR_UA_FALLBACK,
   credentialCache: { exp: 0, source: 'fallback', lastError: null },
   credentialRefresh: null,
   lock: Promise.resolve(),
 }
+
+applyOverrides()
 
 function envNum(name, fallback, min = 0) {
   const value = process.env[name]
@@ -125,10 +134,21 @@ function buildBasic(clientId, clientSecret) {
   return isValidBasic(basic) ? basic : null
 }
 
+function applyOverrides() {
+  if (isValidBasic(ENV_BASIC_ANON)) runtime.basicAnon = ENV_BASIC_ANON
+  if (isValidBasic(ENV_BASIC_AUTH)) runtime.basicAuth = ENV_BASIC_AUTH
+  if (ENV_USER_AGENT) runtime.userAgent = ENV_USER_AGENT
+}
+
 function applyCredentials(authorization, client, basicAuth) {
   runtime.basicAnon = authorization
   if (basicAuth) runtime.basicAuth = basicAuth
   runtime.userAgent = `Crunchyroll/ANDROIDTV/${client.version}_${client.build} (Android 16; en-US; sdk_gphone64_x86_64)`
+  applyOverrides()
+}
+
+function sessionUA(cfg) {
+  return cfg?.loggedIn && cfg.authMode === 'web' ? WEB_UA : runtime.userAgent
 }
 
 async function fetchCredentials() {
@@ -160,6 +180,7 @@ async function refreshCredentials() {
     } catch (error) {
       runtime.credentialCache.lastError = `crextractor: ${error.message}`
       console.warn(`[CR-Notify] Credenciales remotas no disponibles: ${error.message}. Usando fallback.`)
+      applyOverrides()
       runtime.credentialCache = { exp: Date.now() + CREDENTIAL_RETRY_MS, source: 'fallback', lastError: runtime.credentialCache.lastError }
     }
   })().finally(() => { runtime.credentialRefresh = null })
@@ -225,6 +246,39 @@ function getDeviceId() {
   return runtime.deviceId
 }
 
+async function loginWithEtpRt(etpRt) {
+  const response = await fetch(CR_AUTH, {
+    method: 'POST',
+    headers: {
+      Authorization: WEB_BASIC,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': WEB_UA,
+      Cookie: `etp_rt=${etpRt}`,
+    },
+    body: new URLSearchParams({ grant_type: 'etp_rt_cookie' }).toString(),
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.error_description || error.error || `HTTP ${response.status}`)
+  }
+  const data = await response.json()
+  if (!data.access_token) throw new Error('respuesta sin access_token')
+  const cfg = loadCfg()
+  Object.assign(cfg, {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || null,
+    tokenExp: Date.now() + (data.expires_in || 300) * 1000,
+    accountId: data.account_id || null,
+    loggedIn: true,
+    authMode: 'web',
+    etpRt,
+  })
+  saveCfg(cfg)
+  runtime.token = data.access_token
+  runtime.tokenExp = cfg.tokenExp
+}
+
 async function loginWithAccount(email, password) {
   await preLogin()
   const response = await fetch(CR_AUTH, {
@@ -258,14 +312,49 @@ async function loginWithAccount(email, password) {
     tokenExp: Date.now() + (data.expires_in || 300) * 1000,
     accountId: data.account_id || null,
     loggedIn: true,
+    authMode: 'tv',
   })
+  delete cfg.etpRt
   saveCfg(cfg)
   runtime.token = data.access_token
   runtime.tokenExp = cfg.tokenExp
 }
 
+async function refreshWebToken(cfg) {
+  if (cfg.refreshToken) {
+    const response = await fetch(CR_AUTH, {
+      method: 'POST',
+      headers: {
+        Authorization: WEB_BASIC,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': WEB_UA,
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: cfg.refreshToken,
+        scope: 'offline_access',
+      }).toString(),
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (response.ok) {
+      const data = await response.json()
+      cfg.accessToken = data.access_token
+      cfg.refreshToken = data.refresh_token || cfg.refreshToken
+      cfg.tokenExp = Date.now() + (data.expires_in || 300) * 1000
+      saveCfg(cfg)
+      runtime.token = data.access_token
+      runtime.tokenExp = cfg.tokenExp
+      return runtime.token
+    }
+  }
+  if (!cfg.etpRt) throw new Error(`Sin sesión web; usa ${CR_PREFIX}crlogin nuevamente.`)
+  await loginWithEtpRt(cfg.etpRt)
+  return runtime.token
+}
+
 async function refreshAccountToken() {
   const cfg = loadCfg()
+  if (cfg.authMode === 'web') return refreshWebToken(cfg)
   if (!cfg.refreshToken) throw new Error(`Sin refresh token; usa ${CR_PREFIX}crlogin nuevamente.`)
   await preLogin()
   const response = await fetch(CR_AUTH, {
@@ -318,7 +407,7 @@ async function crFetch(endpoint, params = {}, base = CR_BASE, timeoutMs = 20_000
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
-        'User-Agent': runtime.userAgent,
+        'User-Agent': sessionUA(loadCfg()),
         Accept: 'application/json',
         Cookie: runtime.cookies,
       },
@@ -516,7 +605,6 @@ async function checkAndSend(sock, manual = false) {
             console.error(`[CR-Notify] Error enviando ${episode.id} a ${jid}:`, error.message)
           }
         }
-        // Se conserva para reintentar en la siguiente revisión si todos fallaron.
         if (successful === jids.length) {
           markSeen(episode.id)
           sent++
@@ -550,13 +638,17 @@ function usage(command = 'crnotify') {
 async function runLogin({ msg, sock, args, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño puede iniciar sesión en Crunchyroll.')
   if (msg.isGroup) return msg.reply(`⛔ Usa ${CR_PREFIX}crlogin únicamente por privado.`)
-  const email = args[0]
+  const first = args[0]
   const password = args.slice(1).join(' ')
-  if (!email || !password) return msg.reply(`💡 Uso: ${CR_PREFIX}crlogin correo contraseña`)
+  const usageText = `💡 Uso: ${CR_PREFIX}crlogin correo contraseña\nO: ${CR_PREFIX}crlogin etp_rt`
+  if (!first) return msg.reply(usageText)
+  const tokenLogin = !password
+  if (tokenLogin && (first.includes('@') || !/^[A-Za-z0-9._~-]{8,256}$/.test(first))) return msg.reply(usageText)
   await msg.delete?.().catch(() => {})
   await msg.react?.('⏳').catch(() => {})
   try {
-    await loginWithAccount(email, password)
+    if (tokenLogin) await loginWithEtpRt(first)
+    else await loginWithAccount(first, password)
     const cfg = loadCfg()
     cfg.cronDisabled = false
     saveCfg(cfg)
@@ -571,7 +663,7 @@ async function runLogin({ msg, sock, args, isOwner }) {
 async function runLogout({ msg, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño.')
   const cfg = loadCfg()
-  for (const key of ['accessToken', 'refreshToken', 'tokenExp', 'accountId', 'loggedIn']) delete cfg[key]
+  for (const key of ['accessToken', 'refreshToken', 'tokenExp', 'accountId', 'loggedIn', 'authMode', 'etpRt']) delete cfg[key]
   saveCfg(cfg)
   runtime.token = null
   runtime.tokenExp = 0
@@ -605,7 +697,7 @@ async function runStatus({ msg }) {
   const groups = cfg.targetJids.length ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${jid}`).join('\n') : `  Ninguno — usa ${CR_PREFIX}crset`
   return msg.reply(
     `📊 *CR-Notify Status*\n\n` +
-    `🔑 Modo: *${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'}*\n` +
+    `🔑 Modo: *${cfg.loggedIn ? (cfg.authMode === 'web' ? 'Cuenta real (etp_rt)' : 'Cuenta real') : 'Anónimo'}*\n` +
     `⏳ Token expira: *${exp}*\n` +
     `🔁 Refresh token: *${cfg.refreshToken ? 'Sí' : 'No'}*\n` +
     `⏱️ Cron: cada *${minutes} min*\n` +
@@ -700,7 +792,7 @@ async function runDiag({ msg, isOwner }) {
   try {
     await refreshCredentials()
     lines.push(`📡 Credenciales: *${runtime.credentialCache.source}*`)
-    lines.push(`🔐 Basic Auth: *${runtime.basicAuth === BASIC_AUTH_FALLBACK ? 'fallback' : 'activa'}*`)
+    lines.push(`🔐 Basic Auth: *${runtime.basicAuth === NX_BASIC ? 'nx' : 'personalizada'}*`)
     lines.push(`🧭 User-Agent: \`${runtime.userAgent.slice(0, 48)}...\``)
     try {
       const token = await getAnonToken()

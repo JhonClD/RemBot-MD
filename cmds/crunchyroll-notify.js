@@ -16,6 +16,7 @@ const BASIC_AUTH_FALLBACK = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVL
 const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; sdk_gphone64_x86_64)'
 const NX_BASIC = 'Basic ZXI5bmdnMmtvNW9oaXJsYTUxaTI6VmwxVDBQbjhRWko2d3o0NnhYRGxIekRGUDV0Wlgxb3E='
 const NX_UA = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 12; en-US; SHIELD Android TV Build/SR1A.220624.014)'
+const SWITCH_BASIC = `Basic ${Buffer.from('t-kdgp2h8c3jub8fn0fq:yfLDfMfrYvKXh4JXS1LEI2cCqu1v5Wan').toString('base64')}`
 const WEB_BASIC = 'Basic bm9haWhkZXZtXzZpeWcwYThsMHE6'
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const ENV_BASIC_ANON = (process.env.CR_BASIC_ANON || NX_BASIC).trim()
@@ -172,7 +173,7 @@ function applyCredentials(authorization, client, basicAuth) {
 }
 
 function sessionUA(cfg) {
-  return cfg?.loggedIn && cfg.authMode === 'web' ? WEB_UA : runtime.userAgent
+  return cfg?.loggedIn && (cfg.authMode === 'web' || cfg.authBasic === SWITCH_BASIC) ? WEB_UA : runtime.userAgent
 }
 
 async function fetchCredentials() {
@@ -387,37 +388,55 @@ async function loginWithEtpRt(rawEtpRt) {
   runtime.tokenExp = cfg.tokenExp
 }
 
-function authBasicCandidates() {
-  return [...new Set([runtime.basicAuth, BASIC_AUTH_FALLBACK, NX_BASIC].filter(isValidBasic))]
+function authProfiles() {
+  const profiles = [
+    // Cliente que usa yt-dlp para login con contraseña: cuerpo mínimo y cabeceras de navegador.
+    { basic: SWITCH_BASIC, web: true },
+    ...[runtime.basicAuth, BASIC_AUTH_FALLBACK, NX_BASIC].filter(isValidBasic).map((basic) => ({ basic, web: false })),
+  ]
+  const seen = new Set()
+  return profiles.filter((profile) => !seen.has(profile.basic) && seen.add(profile.basic))
 }
+
+async function buildAuthRequest(basic, bodyParams) {
+  const web = basic === SWITCH_BASIC
+  const headers = {
+    Authorization: basic,
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'User-Agent': web ? WEB_UA : runtime.userAgent,
+  }
+  const body = new URLSearchParams(bodyParams)
+  if (web) {
+    headers.Accept = 'application/json'
+    const cookies = await getWebCookies()
+    if (cookies) headers.Cookie = cookies
+  } else {
+    await preLogin()
+    headers['ETP-Anonymous-ID'] = runtime.anonId
+    headers.Cookie = runtime.cookies
+    body.set('device_id', getDeviceId())
+    body.set('device_type', 'ANDROIDTV')
+  }
+  return { headers, body: body.toString() }
+}
+
+const CLIENT_REJECTED = /unsupported_grant_type|invalid_client|unauthorized_client/i
 
 async function loginWithAccount(email, password) {
   let lastError
-  for (const basic of authBasicCandidates()) {
+  for (const { basic } of authProfiles()) {
     let rejectedClient = false
     for (let attempt = 0; attempt < 2; attempt++) {
-      await preLogin(attempt > 0)
+      if (attempt > 0 && basic !== SWITCH_BASIC) await preLogin(true)
       let response
       try {
-        response = await proxyFetch(CR_AUTH, {
-          method: 'POST',
-          headers: {
-            Authorization: basic,
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': runtime.userAgent,
-            'ETP-Anonymous-ID': runtime.anonId,
-            Cookie: runtime.cookies,
-          },
-          body: new URLSearchParams({
-            grant_type: 'password',
-            username: email,
-            password,
-            scope: 'offline_access',
-            device_id: getDeviceId(),
-            device_type: 'ANDROIDTV',
-          }).toString(),
-          signal: AbortSignal.timeout(20_000),
+        const { headers, body } = await buildAuthRequest(basic, {
+          grant_type: 'password',
+          username: email,
+          password,
+          scope: 'offline_access',
         })
+        response = await proxyFetch(CR_AUTH, { method: 'POST', headers, body, signal: AbortSignal.timeout(20_000) })
       } catch (error) {
         lastError = netError(error)
         continue
@@ -426,7 +445,7 @@ async function loginWithAccount(email, password) {
       const raw = await response.text().catch(() => '')
       if (!response.ok) {
         lastError = new Error(describeAuthError(response.status, raw, 'password'))
-        if (/unsupported_grant_type|invalid_client|unauthorized_client/i.test(raw)) {
+        if (CLIENT_REJECTED.test(raw)) {
           rejectedClient = true
           break
         }
@@ -496,25 +515,18 @@ async function refreshAccountToken() {
   const cfg = loadCfg()
   if (cfg.authMode === 'web') return refreshWebToken(cfg)
   if (!cfg.refreshToken) throw new Error(`Sin refresh token; usa ${CR_PREFIX}crlogin nuevamente.`)
-  await preLogin()
-  const response = await proxyFetch(CR_AUTH, {
-    method: 'POST',
-    headers: {
-      Authorization: isValidBasic(cfg.authBasic) ? cfg.authBasic : runtime.basicAuth,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': runtime.userAgent,
-      'ETP-Anonymous-ID': runtime.anonId,
-      Cookie: runtime.cookies,
-    },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: cfg.refreshToken,
-      scope: 'offline_access',
-      device_id: getDeviceId(),
-      device_type: 'ANDROIDTV',
-    }).toString(),
-    signal: AbortSignal.timeout(15_000),
+  const basic = isValidBasic(cfg.authBasic) ? cfg.authBasic : runtime.basicAuth
+  const { headers, body } = await buildAuthRequest(basic, {
+    grant_type: 'refresh_token',
+    refresh_token: cfg.refreshToken,
+    scope: 'offline_access',
   })
+  let response
+  try {
+    response = await proxyFetch(CR_AUTH, { method: 'POST', headers, body, signal: AbortSignal.timeout(15_000) })
+  } catch (error) {
+    throw netError(error)
+  }
   if (!response.ok) {
     const raw = await response.text().catch(() => '')
     throw new Error(describeAuthError(response.status, raw, 'refresh'))

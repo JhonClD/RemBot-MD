@@ -19,7 +19,7 @@ const NX_UA = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 12; en-US; SHIELD And
 const WEB_BASIC = 'Basic bm9haWhkZXZtXzZpeWcwYThsMHE6'
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const ENV_BASIC_ANON = (process.env.CR_BASIC_ANON || NX_BASIC).trim()
-const ENV_BASIC_AUTH = (process.env.CR_BASIC_AUTH || NX_BASIC).trim()
+const ENV_BASIC_AUTH = (process.env.CR_BASIC_AUTH || '').trim()
 const ENV_USER_AGENT = (process.env.CR_USER_AGENT || NX_UA).trim().replace(/[\u0000-\u001f\u007f]/g, '')
 
 const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
@@ -65,6 +65,30 @@ function envNum(name, fallback, min = 0) {
   if (value === undefined || value === '') return fallback
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed >= min ? parsed : fallback
+}
+
+const CR_PROXY = (process.env.CR_PROXY || '').trim()
+let proxyDispatcher
+let proxyWarned = false
+
+async function proxyFetch(url, options = {}) {
+  if (!CR_PROXY) return fetch(url, options)
+  try {
+    if (!proxyDispatcher) {
+      const { ProxyAgent } = await import('undici')
+      proxyDispatcher = new ProxyAgent(CR_PROXY)
+    }
+    return await fetch(url, { ...options, dispatcher: proxyDispatcher })
+  } catch (error) {
+    if (error?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find (package|module)/i.test(error?.message || '')) {
+      if (!proxyWarned) {
+        proxyWarned = true
+        console.warn('[CR-Notify] CR_PROXY definido pero falta undici (npm i undici). Usando conexión directa.')
+      }
+      return fetch(url, options)
+    }
+    throw error
+  }
 }
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -192,7 +216,7 @@ async function preLogin(force = false) {
   if (!force && runtime.cookies && Date.now() < runtime.cookiesExp) return
   await refreshCredentials()
   try {
-    const response = await fetch(CR_BASE, {
+    const response = await proxyFetch(CR_BASE, {
       headers: { 'User-Agent': runtime.userAgent },
       signal: AbortSignal.timeout(15000),
     })
@@ -207,7 +231,7 @@ async function getAnonToken() {
   await refreshCredentials()
   await preLogin()
 
-  const response = await fetch(CR_AUTH, {
+  const response = await proxyFetch(CR_AUTH, {
     method: 'POST',
     headers: {
       Authorization: runtime.basicAnon,
@@ -257,7 +281,7 @@ function parseEtpRt(raw) {
 
 async function getWebCookies() {
   try {
-    const response = await fetch(CR_BASE, {
+    const response = await proxyFetch(CR_BASE, {
       headers: { 'User-Agent': WEB_UA, Accept: 'text/html,application/xhtml+xml' },
       signal: AbortSignal.timeout(15_000),
     })
@@ -271,22 +295,42 @@ async function getWebCookies() {
   }
 }
 
-function describeAuthError(status, body) {
+function describeAuthError(status, body, kind = 'cookie') {
   let parsed = null
   try { parsed = JSON.parse(body) } catch {}
-  const code = parsed?.error || parsed?.code || ''
-  const detail = parsed?.error_description || parsed?.message || ''
+  const code = String(parsed?.error || parsed?.code || '')
+  const detail = String(parsed?.error_description || parsed?.message || '')
+  const blob = `${code} ${detail}`
   if (status === 403 && /just a moment|cloudflare|cf-ray|attention required/i.test(body)) {
-    return 'Cloudflare bloqueó la IP del servidor (403). Prueba desde otra IP o con proxy.'
-  }
-  if (status === 400 || status === 401) {
-    if (/invalid_grant|invalid_token|unauthorized/i.test(`${code} ${detail}`) || status === 401) {
-      return `La cookie etp_rt no es válida o ya venció (HTTP ${status}). Vuelve a copiarla desde un navegador con la sesión abierta.`
-    }
+    return CR_PROXY
+      ? 'Cloudflare bloqueó también la conexión con el proxy (403). Prueba otro proxy.'
+      : 'Cloudflare bloqueó la IP del servidor (403). Define CR_PROXY con un proxy residencial o corre el bot en otra IP.'
   }
   if (status === 429) return 'Demasiados intentos (429). Espera unos minutos.'
+  if (/unsupported_grant_type|invalid_client|unauthorized_client/i.test(blob)) {
+    return `Crunchyroll rechazó las credenciales de la app (${code}). Define CR_BASIC_AUTH con un Basic actualizado del cliente TV.`
+  }
+  if (kind === 'password' && (status === 400 || status === 401 || status === 403)) {
+    if (/invalid_credentials|invalid_grant|incorrect|wrong|unauthori[sz]ed|password/i.test(blob)) {
+      return 'Correo o contraseña incorrectos. Si tu cuenta entra con Google o Apple, no tiene contraseña: usa etp_rt.'
+    }
+    if (/captcha|challenge|too.many|locked|suspend/i.test(blob)) {
+      return `Crunchyroll pidió verificación o limitó la cuenta (${code || status}). Inicia sesión una vez desde el navegador y reintenta.`
+    }
+  }
+  if (kind === 'refresh' && (status === 400 || status === 401)) {
+    return `La sesión guardada ya no es válida (HTTP ${status}). Usa ${CR_PREFIX}crlogin de nuevo.`
+  }
+  if (kind === 'cookie' && (status === 400 || status === 401)) {
+    return `La cookie etp_rt no es válida o ya venció (HTTP ${status}). Vuelve a copiarla desde un navegador con la sesión abierta.`
+  }
   const text = detail || code || body.replace(/\s+/g, ' ').slice(0, 120)
   return `HTTP ${status}${text ? `: ${text}` : ''}`
+}
+
+function netError(error) {
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return new Error('tiempo de espera agotado al conectar con Crunchyroll')
+  return new Error(`sin conexión con Crunchyroll (${error?.cause?.code || error?.message})`)
 }
 
 async function loginWithEtpRt(rawEtpRt) {
@@ -296,7 +340,7 @@ async function loginWithEtpRt(rawEtpRt) {
   const webCookies = await getWebCookies()
   let response
   try {
-    response = await fetch(CR_AUTH, {
+    response = await proxyFetch(CR_AUTH, {
       method: 'POST',
       headers: {
         Authorization: WEB_BASIC,
@@ -312,8 +356,7 @@ async function loginWithEtpRt(rawEtpRt) {
       signal: AbortSignal.timeout(20_000),
     })
   } catch (error) {
-    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new Error('tiempo de espera agotado al conectar con Crunchyroll')
-    throw new Error(`sin conexión con Crunchyroll (${error?.cause?.code || error?.message})`)
+    throw netError(error)
   }
 
   const raw = await response.text().catch(() => '')
@@ -344,50 +387,82 @@ async function loginWithEtpRt(rawEtpRt) {
   runtime.tokenExp = cfg.tokenExp
 }
 
+function authBasicCandidates() {
+  return [...new Set([runtime.basicAuth, BASIC_AUTH_FALLBACK, NX_BASIC].filter(isValidBasic))]
+}
+
 async function loginWithAccount(email, password) {
-  await preLogin()
-  const response = await fetch(CR_AUTH, {
-    method: 'POST',
-    headers: {
-      Authorization: runtime.basicAuth,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': runtime.userAgent,
-      'ETP-Anonymous-ID': runtime.anonId,
-      Cookie: runtime.cookies,
-    },
-    body: new URLSearchParams({
-      grant_type: 'password',
-      username: email,
-      password,
-      scope: 'offline_access',
-      device_id: getDeviceId(),
-      device_type: 'ANDROIDTV',
-    }).toString(),
-    signal: AbortSignal.timeout(20_000),
-  })
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}))
-    throw new Error(error.error_description || error.error || `HTTP ${response.status}`)
+  let lastError
+  for (const basic of authBasicCandidates()) {
+    let rejectedClient = false
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await preLogin(attempt > 0)
+      let response
+      try {
+        response = await proxyFetch(CR_AUTH, {
+          method: 'POST',
+          headers: {
+            Authorization: basic,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': runtime.userAgent,
+            'ETP-Anonymous-ID': runtime.anonId,
+            Cookie: runtime.cookies,
+          },
+          body: new URLSearchParams({
+            grant_type: 'password',
+            username: email,
+            password,
+            scope: 'offline_access',
+            device_id: getDeviceId(),
+            device_type: 'ANDROIDTV',
+          }).toString(),
+          signal: AbortSignal.timeout(20_000),
+        })
+      } catch (error) {
+        lastError = netError(error)
+        continue
+      }
+
+      const raw = await response.text().catch(() => '')
+      if (!response.ok) {
+        lastError = new Error(describeAuthError(response.status, raw, 'password'))
+        if (/unsupported_grant_type|invalid_client|unauthorized_client/i.test(raw)) {
+          rejectedClient = true
+          break
+        }
+        // Reintento único con cookies nuevas solo si parece un bloqueo transitorio.
+        if (response.status === 403 || response.status >= 500) continue
+        throw lastError
+      }
+
+      let data
+      try { data = JSON.parse(raw) } catch { throw new Error('respuesta no válida de Crunchyroll') }
+      if (!data.access_token) throw new Error('respuesta sin access_token')
+
+      const cfg = loadCfg()
+      Object.assign(cfg, {
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token || null,
+        tokenExp: Date.now() + (data.expires_in || 300) * 1000,
+        accountId: data.account_id || null,
+        loggedIn: true,
+        authMode: 'tv',
+        authBasic: basic, // el refresh_token solo funciona con el mismo cliente que lo emitió
+      })
+      delete cfg.etpRt
+      saveCfg(cfg)
+      runtime.token = data.access_token
+      runtime.tokenExp = cfg.tokenExp
+      return
+    }
+    if (!rejectedClient) break
   }
-  const data = await response.json()
-  const cfg = loadCfg()
-  Object.assign(cfg, {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || null,
-    tokenExp: Date.now() + (data.expires_in || 300) * 1000,
-    accountId: data.account_id || null,
-    loggedIn: true,
-    authMode: 'tv',
-  })
-  delete cfg.etpRt
-  saveCfg(cfg)
-  runtime.token = data.access_token
-  runtime.tokenExp = cfg.tokenExp
+  throw lastError || new Error('no se pudo iniciar sesión')
 }
 
 async function refreshWebToken(cfg) {
   if (cfg.refreshToken) {
-    const response = await fetch(CR_AUTH, {
+    const response = await proxyFetch(CR_AUTH, {
       method: 'POST',
       headers: {
         Authorization: WEB_BASIC,
@@ -422,10 +497,10 @@ async function refreshAccountToken() {
   if (cfg.authMode === 'web') return refreshWebToken(cfg)
   if (!cfg.refreshToken) throw new Error(`Sin refresh token; usa ${CR_PREFIX}crlogin nuevamente.`)
   await preLogin()
-  const response = await fetch(CR_AUTH, {
+  const response = await proxyFetch(CR_AUTH, {
     method: 'POST',
     headers: {
-      Authorization: runtime.basicAuth,
+      Authorization: isValidBasic(cfg.authBasic) ? cfg.authBasic : runtime.basicAuth,
       'Content-Type': 'application/x-www-form-urlencoded',
       'User-Agent': runtime.userAgent,
       'ETP-Anonymous-ID': runtime.anonId,
@@ -440,7 +515,10 @@ async function refreshAccountToken() {
     }).toString(),
     signal: AbortSignal.timeout(15_000),
   })
-  if (!response.ok) throw new Error(`Refresh HTTP ${response.status}`)
+  if (!response.ok) {
+    const raw = await response.text().catch(() => '')
+    throw new Error(describeAuthError(response.status, raw, 'refresh'))
+  }
   const data = await response.json()
   cfg.accessToken = data.access_token
   cfg.refreshToken = data.refresh_token || cfg.refreshToken
@@ -469,7 +547,7 @@ async function crFetch(endpoint, params = {}, base = CR_BASE, timeoutMs = 20_000
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await getToken()
-    const response = await fetch(url, {
+    const response = await proxyFetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
         'User-Agent': sessionUA(loadCfg()),
@@ -708,6 +786,7 @@ async function runLogin({ msg, sock, args, isOwner }) {
   const usageText = `💡 Uso: ${CR_PREFIX}crlogin correo contraseña\nO: ${CR_PREFIX}crlogin etp_rt`
   if (!first) return msg.reply(usageText)
   const tokenLogin = !password
+  if (!tokenLogin && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(first)) return msg.reply(`⚠️ El correo no parece válido.\n${usageText}`)
   if (tokenLogin && !parseEtpRt(args.join(' '))) return msg.reply(`⚠️ El valor no parece una cookie etp_rt válida.\n${usageText}`)
   await msg.delete?.().catch(() => {})
   await msg.react?.('⏳').catch(() => {})
@@ -730,7 +809,7 @@ async function runLogin({ msg, sock, args, isOwner }) {
 async function runLogout({ msg, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño.')
   const cfg = loadCfg()
-  for (const key of ['accessToken', 'refreshToken', 'tokenExp', 'accountId', 'loggedIn', 'authMode', 'etpRt']) delete cfg[key]
+  for (const key of ['accessToken', 'refreshToken', 'tokenExp', 'accountId', 'loggedIn', 'authMode', 'etpRt', 'authBasic']) delete cfg[key]
   saveCfg(cfg)
   runtime.token = null
   runtime.tokenExp = 0
@@ -859,7 +938,7 @@ async function runDiag({ msg, isOwner }) {
   try {
     await refreshCredentials()
     lines.push(`📡 Credenciales: *${runtime.credentialCache.source}*`)
-    lines.push(`🔐 Basic Auth: *${runtime.basicAuth === NX_BASIC ? 'nx' : 'personalizada'}*`)
+    lines.push(`🔐 Basic Auth: *${ENV_BASIC_AUTH ? 'personalizada' : runtime.credentialCache.source}*`)
     lines.push(`🧭 User-Agent: \`${runtime.userAgent.slice(0, 48)}...\``)
     try {
       const token = await getAnonToken()

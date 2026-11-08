@@ -2,6 +2,7 @@ import axios from 'axios'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { prepareWAMessageMedia } from 'baileys'
 const require = createRequire(import.meta.url)
 const cheerio = require('cheerio')
 
@@ -27,6 +28,35 @@ function saveRssDb() {
   fs.writeFileSync(temp, JSON.stringify(loadRssDb(), null, 2), 'utf8')
   try { fs.chmodSync(temp, 0o600) } catch {}
   fs.renameSync(temp, RSS_DB_PATH)
+}
+
+async function createImageLinkPreview(conn, imageBuffer, metadata = {}) {
+  if (!conn?.waUploadToServer || !Buffer.isBuffer(imageBuffer) || imageBuffer.length === 0) return null
+
+  try {
+    const { imageMessage } = await prepareWAMessageMedia(
+      { image: imageBuffer },
+      {
+        upload: conn.waUploadToServer,
+        mediaTypeOverride: 'thumbnail-link',
+      },
+    )
+
+    if (!imageMessage) return null
+    return {
+      'canonical-url': metadata.url,
+      'matched-text': metadata.url,
+      title: metadata.title || '',
+      description: metadata.description || '',
+      jpegThumbnail: imageMessage.jpegThumbnail
+        ? Buffer.from(imageMessage.jpegThumbnail)
+        : undefined,
+      highQualityThumbnail: imageMessage,
+    }
+  } catch (error) {
+    console.warn('[RSS Preview] no se pudo preparar la imagen enlazada:', error?.message || error)
+    return null
+  }
 }
 
 const POLL_INTERVAL_MS    = 10 * 60 * 1000
@@ -386,7 +416,17 @@ async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
 
     const previewUrl = item.link || item.guid || item.img
     if (imageBuffer) {
-      await conn.sendMessage(chatId, { image: imageBuffer, caption: text })
+      const linkPreview = await createImageLinkPreview(conn, imageBuffer, {
+        url: previewUrl,
+        title: translatedTitle || feed.label || 'RSS',
+        description: translatedDesc || translatedLabel || 'Nueva publicación RSS',
+      })
+
+      if (linkPreview) {
+        await conn.sendMessage(chatId, { text, linkPreview })
+      } else {
+        await conn.sendMessage(chatId, { image: imageBuffer, caption: text })
+      }
     } else {
       await conn.sendMessage(chatId, { image: { url: item.img }, caption: text })
     }

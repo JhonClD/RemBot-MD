@@ -246,24 +246,89 @@ function getDeviceId() {
   return runtime.deviceId
 }
 
-async function loginWithEtpRt(etpRt) {
-  const response = await fetch(CR_AUTH, {
-    method: 'POST',
-    headers: {
-      Authorization: WEB_BASIC,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': WEB_UA,
-      Cookie: `etp_rt=${etpRt}`,
-    },
-    body: new URLSearchParams({ grant_type: 'etp_rt_cookie' }).toString(),
-    signal: AbortSignal.timeout(20_000),
-  })
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}))
-    throw new Error(error.error_description || error.error || `HTTP ${response.status}`)
+function parseEtpRt(raw) {
+  let value = String(raw || '').trim().replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '')
+  const match = value.match(/etp_rt=([^;\s]+)/i)
+  if (match) value = match[1]
+  value = value.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '')
+  if (!value || value.includes('@')) return null
+  return /^[A-Za-z0-9._~%+=-]{16,4096}$/.test(value) ? value : null
+}
+
+async function getWebCookies() {
+  try {
+    const response = await fetch(CR_BASE, {
+      headers: { 'User-Agent': WEB_UA, Accept: 'text/html,application/xhtml+xml' },
+      signal: AbortSignal.timeout(15_000),
+    })
+    const cookies = response.headers.getSetCookie?.() || []
+    return cookies
+      .map((cookie) => cookie.split(';')[0])
+      .filter((cookie) => cookie && !/^etp_rt=/i.test(cookie))
+      .join('; ')
+  } catch {
+    return ''
   }
-  const data = await response.json()
+}
+
+function describeAuthError(status, body) {
+  let parsed = null
+  try { parsed = JSON.parse(body) } catch {}
+  const code = parsed?.error || parsed?.code || ''
+  const detail = parsed?.error_description || parsed?.message || ''
+  if (status === 403 && /just a moment|cloudflare|cf-ray|attention required/i.test(body)) {
+    return 'Cloudflare bloqueó la IP del servidor (403). Prueba desde otra IP o con proxy.'
+  }
+  if (status === 400 || status === 401) {
+    if (/invalid_grant|invalid_token|unauthorized/i.test(`${code} ${detail}`) || status === 401) {
+      return `La cookie etp_rt no es válida o ya venció (HTTP ${status}). Vuelve a copiarla desde un navegador con la sesión abierta.`
+    }
+  }
+  if (status === 429) return 'Demasiados intentos (429). Espera unos minutos.'
+  const text = detail || code || body.replace(/\s+/g, ' ').slice(0, 120)
+  return `HTTP ${status}${text ? `: ${text}` : ''}`
+}
+
+async function loginWithEtpRt(rawEtpRt) {
+  const etpRt = parseEtpRt(rawEtpRt)
+  if (!etpRt) throw new Error('formato de etp_rt inválido')
+
+  const webCookies = await getWebCookies()
+  let response
+  try {
+    response = await fetch(CR_AUTH, {
+      method: 'POST',
+      headers: {
+        Authorization: WEB_BASIC,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': WEB_UA,
+        Accept: 'application/json',
+        Origin: CR_BASE,
+        Referer: `${CR_BASE}/`,
+        'ETP-Anonymous-ID': runtime.anonId,
+        Cookie: [webCookies, `etp_rt=${etpRt}`].filter(Boolean).join('; '),
+      },
+      body: new URLSearchParams({ grant_type: 'etp_rt_cookie' }).toString(),
+      signal: AbortSignal.timeout(20_000),
+    })
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new Error('tiempo de espera agotado al conectar con Crunchyroll')
+    throw new Error(`sin conexión con Crunchyroll (${error?.cause?.code || error?.message})`)
+  }
+
+  const raw = await response.text().catch(() => '')
+  if (!response.ok) throw new Error(describeAuthError(response.status, raw))
+
+  let data
+  try { data = JSON.parse(raw) } catch { throw new Error('respuesta no válida de Crunchyroll') }
   if (!data.access_token) throw new Error('respuesta sin access_token')
+
+  // Crunchyroll puede rotar la cookie etp_rt en cada uso: guardar la nueva si llega.
+  const rotated = (response.headers.getSetCookie?.() || [])
+    .map((cookie) => cookie.split(';')[0])
+    .find((cookie) => /^etp_rt=/i.test(cookie))
+  const nextEtpRt = rotated ? rotated.slice(rotated.indexOf('=') + 1) || etpRt : etpRt
+
   const cfg = loadCfg()
   Object.assign(cfg, {
     accessToken: data.access_token,
@@ -272,7 +337,7 @@ async function loginWithEtpRt(etpRt) {
     accountId: data.account_id || null,
     loggedIn: true,
     authMode: 'web',
-    etpRt,
+    etpRt: nextEtpRt,
   })
   saveCfg(cfg)
   runtime.token = data.access_token
@@ -643,20 +708,22 @@ async function runLogin({ msg, sock, args, isOwner }) {
   const usageText = `💡 Uso: ${CR_PREFIX}crlogin correo contraseña\nO: ${CR_PREFIX}crlogin etp_rt`
   if (!first) return msg.reply(usageText)
   const tokenLogin = !password
-  if (tokenLogin && (first.includes('@') || !/^[A-Za-z0-9._~-]{8,256}$/.test(first))) return msg.reply(usageText)
+  if (tokenLogin && !parseEtpRt(args.join(' '))) return msg.reply(`⚠️ El valor no parece una cookie etp_rt válida.\n${usageText}`)
   await msg.delete?.().catch(() => {})
   await msg.react?.('⏳').catch(() => {})
   try {
-    if (tokenLogin) await loginWithEtpRt(first)
+    if (tokenLogin) await loginWithEtpRt(args.join(' '))
     else await loginWithAccount(first, password)
     const cfg = loadCfg()
     cfg.cronDisabled = false
     saveCfg(cfg)
     startCron(sock)
     await msg.react?.('✅').catch(() => {})
+    await msg.reply('✅ Sesión de Crunchyroll iniciada.')
   } catch (error) {
     console.error('[CR-Notify] Login:', error.message)
     await msg.react?.('❎').catch(() => {})
+    await msg.reply(`❌ Login falló: ${error.message}`)
   }
 }
 

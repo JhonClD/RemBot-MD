@@ -1,6 +1,6 @@
 # RemBot-MD
 
-Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculación a WhatsApp y tiene **un solo comando**: `/dw4`, que comprime un video a 360p.
+Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculación a WhatsApp e incluye `/dw4` para comprimir videos a 360p y `/rss` para suscribirse a fuentes RSS.
 
 ## Requisitos
 
@@ -64,6 +64,23 @@ Responde al mensaje que contiene el video con:
 
 El resultado se envía como video MP4 a 360p. Para recibirlo como documento, usa `/dw4 doc`.
 
+## Usar `/rss`
+
+El comando RSS permite administrar fuentes y recibir automáticamente sus novedades traducidas al español:
+
+```text
+/rss https://ejemplo.com/feed.xml
+/rss list
+/rss ver [n]
+/rss del <n>
+/rss pause <n>
+/rss resume <n>
+/rss check
+/rss test [n]
+```
+
+La configuración y los identificadores vistos se guardan localmente en `lib/system/tmp/rss-notify/feeds.json`, una ruta excluida por `.gitignore`. Agregar, eliminar, pausar, reanudar y probar feeds requiere ser owner o administrador del grupo.
+
 El prefijo predeterminado es `/`. Se puede cambiar con `BOT_PREFIX` en `.env`, si se desea.
 
 ## Progreso en terminal
@@ -76,4 +93,4 @@ Los owners se leen desde `BOT_OWNER_NUMBER` en `.env` local; admite varios núme
 
 ## Alcance y seguridad
 
-Se conservó únicamente el comando `/dw4`; no se importaron las demás ramas del plugin adjunto. Los videos temporales se eliminan al terminar el procesamiento. Se mantienen la licencia MIT y los avisos de copyright originales en `LICENSE`.
+Los videos temporales se eliminan al terminar el procesamiento y la configuración RSS permanece fuera del repositorio. No publiques `.env`, sesiones de WhatsApp ni archivos dentro de `lib/system/tmp/`. Se mantienen la licencia MIT y los avisos de copyright originales en `LICENSE`.

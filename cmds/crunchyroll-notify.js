@@ -16,11 +16,10 @@ const BASIC_AUTH_FALLBACK = 'Basic eTJhcnZqYjBoMHJndnRpemxvdnk6SlZWdndkSXBYdnhVL
 const CR_UA_FALLBACK = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 16; en-US; sdk_gphone64_x86_64)'
 const NX_BASIC = 'Basic ZXI5bmdnMmtvNW9oaXJsYTUxaTI6VmwxVDBQbjhRWko2d3o0NnhYRGxIekRGUDV0Wlgxb3E='
 const NX_UA = 'Crunchyroll/ANDROIDTV/3.76.0_22366 (Android 12; en-US; SHIELD Android TV Build/SR1A.220624.014)'
-const SWITCH_BASIC = `Basic ${Buffer.from('t-kdgp2h8c3jub8fn0fq:yfLDfMfrYvKXh4JXS1LEI2cCqu1v5Wan').toString('base64')}`
 const WEB_BASIC = 'Basic bm9haWhkZXZtXzZpeWcwYThsMHE6'
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 const ENV_BASIC_ANON = (process.env.CR_BASIC_ANON || NX_BASIC).trim()
-const ENV_BASIC_AUTH = (process.env.CR_BASIC_AUTH || '').trim()
+const ENV_BASIC_AUTH = (process.env.CR_BASIC_AUTH || NX_BASIC).trim()
 const ENV_USER_AGENT = (process.env.CR_USER_AGENT || NX_UA).trim().replace(/[\u0000-\u001f\u007f]/g, '')
 
 const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
@@ -68,31 +67,46 @@ function envNum(name, fallback, min = 0) {
   return Number.isFinite(parsed) && parsed >= min ? parsed : fallback
 }
 
-const CR_PROXY = (process.env.CR_PROXY || '').trim()
-let proxyDispatcher
-let proxyWarned = false
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function proxyFetch(url, options = {}) {
-  if (!CR_PROXY) return fetch(url, options)
-  try {
-    if (!proxyDispatcher) {
-      const { ProxyAgent } = await import('undici')
-      proxyDispatcher = new ProxyAgent(CR_PROXY)
-    }
-    return await fetch(url, { ...options, dispatcher: proxyDispatcher })
-  } catch (error) {
-    if (error?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find (package|module)/i.test(error?.message || '')) {
-      if (!proxyWarned) {
-        proxyWarned = true
-        console.warn('[CR-Notify] CR_PROXY definido pero falta undici (npm i undici). Usando conexión directa.')
-      }
-      return fetch(url, options)
-    }
-    throw error
-  }
+let wreq = null
+try {
+  wreq = await import('wreq-js')
+} catch {
+  console.warn('[CR-Notify] wreq-js no está instalado; usando fetch nativo (Cloudflare puede bloquear). Instala con: npm i wreq-js')
 }
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const TLS_PROFILE_TV = (process.env.CR_TLS_PROFILE_TV || 'okhttp_4_12').trim()
+const TLS_PROFILE_WEB = (process.env.CR_TLS_PROFILE_WEB || 'chrome_124').trim()
+let knownProfiles = null
+
+function pickProfile(wanted) {
+  if (!wreq) return undefined
+  try { knownProfiles ??= new Set(wreq.getProfiles?.() || []) } catch { knownProfiles = new Set() }
+  if (!knownProfiles.size || knownProfiles.has(wanted)) return wanted
+  console.warn(`[CR-Notify] Perfil TLS "${wanted}" no existe en wreq-js; usando el predeterminado de la librería.`)
+  return undefined
+}
+
+// Mantiene coherentes el User-Agent y la huella TLS: UA web -> perfil Chrome, UA de TV -> perfil OkHttp.
+async function tlsFetch(url, options = {}) {
+  if (!wreq) return fetch(url, options)
+  const headers = {}
+  for (const [key, value] of Object.entries(options.headers || {})) {
+    if (value !== undefined && value !== null && value !== '') headers[key] = value
+  }
+  const web = headers['User-Agent'] === WEB_UA
+  const browser = pickProfile(web ? TLS_PROFILE_WEB : TLS_PROFILE_TV)
+  return wreq.fetch(url, { ...options, headers, ...(browser ? { browser } : {}) })
+}
+
+function readSetCookies(response) {
+  const list = response.headers?.getSetCookie?.()
+  if (Array.isArray(list) && list.length) return list.map((cookie) => cookie.split(';')[0])
+  if (response.cookies && typeof response.cookies === 'object') return Object.entries(response.cookies).map(([key, value]) => `${key}=${value}`)
+  const raw = response.headers?.get?.('set-cookie')
+  return raw ? raw.split(/,(?=\s*[^;,\s]+=)/).map((cookie) => cookie.trim().split(';')[0]) : []
+}
 
 function atomicWrite(file, value) {
   const temp = `${file}.tmp-${process.pid}-${crypto.randomUUID().slice(0, 8)}`
@@ -173,7 +187,7 @@ function applyCredentials(authorization, client, basicAuth) {
 }
 
 function sessionUA(cfg) {
-  return cfg?.loggedIn && (cfg.authMode === 'web' || cfg.authBasic === SWITCH_BASIC) ? WEB_UA : runtime.userAgent
+  return cfg?.loggedIn && cfg.authMode === 'web' ? WEB_UA : runtime.userAgent
 }
 
 async function fetchCredentials() {
@@ -217,12 +231,11 @@ async function preLogin(force = false) {
   if (!force && runtime.cookies && Date.now() < runtime.cookiesExp) return
   await refreshCredentials()
   try {
-    const response = await proxyFetch(CR_BASE, {
+    const response = await tlsFetch(CR_BASE, {
       headers: { 'User-Agent': runtime.userAgent },
       signal: AbortSignal.timeout(15000),
     })
-    const cookies = response.headers.getSetCookie?.() || []
-    runtime.cookies = cookies.map((cookie) => cookie.split(';')[0]).join('; ')
+    runtime.cookies = readSetCookies(response).join('; ')
     runtime.cookiesExp = Date.now() + COOKIE_TTL_MS
   } catch {}
 }
@@ -232,7 +245,7 @@ async function getAnonToken() {
   await refreshCredentials()
   await preLogin()
 
-  const response = await proxyFetch(CR_AUTH, {
+  const response = await tlsFetch(CR_AUTH, {
     method: 'POST',
     headers: {
       Authorization: runtime.basicAnon,
@@ -271,108 +284,24 @@ function getDeviceId() {
   return runtime.deviceId
 }
 
-function parseEtpRt(raw) {
-  let value = String(raw || '').trim().replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '')
-  const match = value.match(/etp_rt=([^;\s]+)/i)
-  if (match) value = match[1]
-  value = value.replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, '')
-  if (!value || value.includes('@')) return null
-  return /^[A-Za-z0-9._~%+=-]{16,4096}$/.test(value) ? value : null
-}
-
-async function getWebCookies() {
-  try {
-    const response = await proxyFetch(CR_BASE, {
-      headers: { 'User-Agent': WEB_UA, Accept: 'text/html,application/xhtml+xml' },
-      signal: AbortSignal.timeout(15_000),
-    })
-    const cookies = response.headers.getSetCookie?.() || []
-    return cookies
-      .map((cookie) => cookie.split(';')[0])
-      .filter((cookie) => cookie && !/^etp_rt=/i.test(cookie))
-      .join('; ')
-  } catch {
-    return ''
+async function loginWithEtpRt(etpRt) {
+  const response = await tlsFetch(CR_AUTH, {
+    method: 'POST',
+    headers: {
+      Authorization: WEB_BASIC,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': WEB_UA,
+      Cookie: `etp_rt=${etpRt}`,
+    },
+    body: new URLSearchParams({ grant_type: 'etp_rt_cookie' }).toString(),
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.error_description || error.error || `HTTP ${response.status}`)
   }
-}
-
-function describeAuthError(status, body, kind = 'cookie') {
-  let parsed = null
-  try { parsed = JSON.parse(body) } catch {}
-  const code = String(parsed?.error || parsed?.code || '')
-  const detail = String(parsed?.error_description || parsed?.message || '')
-  const blob = `${code} ${detail}`
-  if (status === 403 && /just a moment|cloudflare|cf-ray|attention required/i.test(body)) {
-    return CR_PROXY
-      ? 'Cloudflare bloqueó también la conexión con el proxy (403). Prueba otro proxy.'
-      : 'Cloudflare bloqueó la IP del servidor (403). Define CR_PROXY con un proxy residencial o corre el bot en otra IP.'
-  }
-  if (status === 429) return 'Demasiados intentos (429). Espera unos minutos.'
-  if (/unsupported_grant_type|invalid_client|unauthorized_client/i.test(blob)) {
-    return `Crunchyroll rechazó las credenciales de la app (${code}). Define CR_BASIC_AUTH con un Basic actualizado del cliente TV.`
-  }
-  if (kind === 'password' && (status === 400 || status === 401 || status === 403)) {
-    if (/invalid_credentials|invalid_grant|incorrect|wrong|unauthori[sz]ed|password/i.test(blob)) {
-      return 'Correo o contraseña incorrectos. Si tu cuenta entra con Google o Apple, no tiene contraseña: usa etp_rt.'
-    }
-    if (/captcha|challenge|too.many|locked|suspend/i.test(blob)) {
-      return `Crunchyroll pidió verificación o limitó la cuenta (${code || status}). Inicia sesión una vez desde el navegador y reintenta.`
-    }
-  }
-  if (kind === 'refresh' && (status === 400 || status === 401)) {
-    return `La sesión guardada ya no es válida (HTTP ${status}). Usa ${CR_PREFIX}crlogin de nuevo.`
-  }
-  if (kind === 'cookie' && (status === 400 || status === 401)) {
-    return `La cookie etp_rt no es válida o ya venció (HTTP ${status}). Vuelve a copiarla desde un navegador con la sesión abierta.`
-  }
-  const text = detail || code || body.replace(/\s+/g, ' ').slice(0, 120)
-  return `HTTP ${status}${text ? `: ${text}` : ''}`
-}
-
-function netError(error) {
-  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return new Error('tiempo de espera agotado al conectar con Crunchyroll')
-  return new Error(`sin conexión con Crunchyroll (${error?.cause?.code || error?.message})`)
-}
-
-async function loginWithEtpRt(rawEtpRt) {
-  const etpRt = parseEtpRt(rawEtpRt)
-  if (!etpRt) throw new Error('formato de etp_rt inválido')
-
-  const webCookies = await getWebCookies()
-  let response
-  try {
-    response = await proxyFetch(CR_AUTH, {
-      method: 'POST',
-      headers: {
-        Authorization: WEB_BASIC,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': WEB_UA,
-        Accept: 'application/json',
-        Origin: CR_BASE,
-        Referer: `${CR_BASE}/`,
-        'ETP-Anonymous-ID': runtime.anonId,
-        Cookie: [webCookies, `etp_rt=${etpRt}`].filter(Boolean).join('; '),
-      },
-      body: new URLSearchParams({ grant_type: 'etp_rt_cookie' }).toString(),
-      signal: AbortSignal.timeout(20_000),
-    })
-  } catch (error) {
-    throw netError(error)
-  }
-
-  const raw = await response.text().catch(() => '')
-  if (!response.ok) throw new Error(describeAuthError(response.status, raw))
-
-  let data
-  try { data = JSON.parse(raw) } catch { throw new Error('respuesta no válida de Crunchyroll') }
+  const data = await response.json()
   if (!data.access_token) throw new Error('respuesta sin access_token')
-
-  // Crunchyroll puede rotar la cookie etp_rt en cada uso: guardar la nueva si llega.
-  const rotated = (response.headers.getSetCookie?.() || [])
-    .map((cookie) => cookie.split(';')[0])
-    .find((cookie) => /^etp_rt=/i.test(cookie))
-  const nextEtpRt = rotated ? rotated.slice(rotated.indexOf('=') + 1) || etpRt : etpRt
-
   const cfg = loadCfg()
   Object.assign(cfg, {
     accessToken: data.access_token,
@@ -381,107 +310,57 @@ async function loginWithEtpRt(rawEtpRt) {
     accountId: data.account_id || null,
     loggedIn: true,
     authMode: 'web',
-    etpRt: nextEtpRt,
+    etpRt,
   })
   saveCfg(cfg)
   runtime.token = data.access_token
   runtime.tokenExp = cfg.tokenExp
 }
 
-function authProfiles() {
-  const profiles = [
-    // Cliente que usa yt-dlp para login con contraseña: cuerpo mínimo y cabeceras de navegador.
-    { basic: SWITCH_BASIC, web: true },
-    ...[runtime.basicAuth, BASIC_AUTH_FALLBACK, NX_BASIC].filter(isValidBasic).map((basic) => ({ basic, web: false })),
-  ]
-  const seen = new Set()
-  return profiles.filter((profile) => !seen.has(profile.basic) && seen.add(profile.basic))
-}
-
-async function buildAuthRequest(basic, bodyParams) {
-  const web = basic === SWITCH_BASIC
-  const headers = {
-    Authorization: basic,
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'User-Agent': web ? WEB_UA : runtime.userAgent,
-  }
-  const body = new URLSearchParams(bodyParams)
-  if (web) {
-    headers.Accept = 'application/json'
-    const cookies = await getWebCookies()
-    if (cookies) headers.Cookie = cookies
-  } else {
-    await preLogin()
-    headers['ETP-Anonymous-ID'] = runtime.anonId
-    headers.Cookie = runtime.cookies
-    body.set('device_id', getDeviceId())
-    body.set('device_type', 'ANDROIDTV')
-  }
-  return { headers, body: body.toString() }
-}
-
-const CLIENT_REJECTED = /unsupported_grant_type|invalid_client|unauthorized_client/i
-
 async function loginWithAccount(email, password) {
-  let lastError
-  for (const { basic } of authProfiles()) {
-    let rejectedClient = false
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (attempt > 0 && basic !== SWITCH_BASIC) await preLogin(true)
-      let response
-      try {
-        const { headers, body } = await buildAuthRequest(basic, {
-          grant_type: 'password',
-          username: email,
-          password,
-          scope: 'offline_access',
-        })
-        response = await proxyFetch(CR_AUTH, { method: 'POST', headers, body, signal: AbortSignal.timeout(20_000) })
-      } catch (error) {
-        lastError = netError(error)
-        continue
-      }
-
-      const raw = await response.text().catch(() => '')
-      if (!response.ok) {
-        lastError = new Error(describeAuthError(response.status, raw, 'password'))
-        if (CLIENT_REJECTED.test(raw)) {
-          rejectedClient = true
-          break
-        }
-        // Reintento único con cookies nuevas solo si parece un bloqueo transitorio.
-        if (response.status === 403 || response.status >= 500) continue
-        throw lastError
-      }
-
-      let data
-      try { data = JSON.parse(raw) } catch { throw new Error('respuesta no válida de Crunchyroll') }
-      if (!data.access_token) throw new Error('respuesta sin access_token')
-
-      const cfg = loadCfg()
-      Object.assign(cfg, {
-        accessToken: data.access_token,
-        refreshToken: data.refresh_token || null,
-        tokenExp: Date.now() + (data.expires_in || 300) * 1000,
-        accountId: data.account_id || null,
-        loggedIn: true,
-        authMode: 'tv',
-        authBasic: basic, // el refresh_token solo funciona con el mismo cliente que lo emitió
-      })
-      delete cfg.etpRt
-      saveCfg(cfg)
-      runtime.token = data.access_token
-      runtime.tokenExp = cfg.tokenExp
-      return
-    }
-    if (!rejectedClient) break
+  await preLogin()
+  const response = await tlsFetch(CR_AUTH, {
+    method: 'POST',
+    headers: {
+      Authorization: runtime.basicAuth,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': runtime.userAgent,
+      'ETP-Anonymous-ID': runtime.anonId,
+      Cookie: runtime.cookies,
+    },
+    body: new URLSearchParams({
+      grant_type: 'password',
+      username: email,
+      password,
+      scope: 'offline_access',
+      device_id: getDeviceId(),
+      device_type: 'ANDROIDTV',
+    }).toString(),
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.error_description || error.error || `HTTP ${response.status}`)
   }
-  throw lastError || new Error('no se pudo iniciar sesión')
+  const data = await response.json()
+  const cfg = loadCfg()
+  Object.assign(cfg, {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || null,
+    tokenExp: Date.now() + (data.expires_in || 300) * 1000,
+    accountId: data.account_id || null,
+    loggedIn: true,
+    authMode: 'tv',
+  })
+  delete cfg.etpRt
+  saveCfg(cfg)
+  runtime.token = data.access_token
+  runtime.tokenExp = cfg.tokenExp
 }
 
 async function refreshWebToken(cfg) {
   if (cfg.refreshToken) {
-    const response = await proxyFetch(CR_AUTH, {
+    const response = await tlsFetch(CR_AUTH, {
       method: 'POST',
       headers: {
         Authorization: WEB_BASIC,
@@ -515,22 +394,26 @@ async function refreshAccountToken() {
   const cfg = loadCfg()
   if (cfg.authMode === 'web') return refreshWebToken(cfg)
   if (!cfg.refreshToken) throw new Error(`Sin refresh token; usa ${CR_PREFIX}crlogin nuevamente.`)
-  const basic = isValidBasic(cfg.authBasic) ? cfg.authBasic : runtime.basicAuth
-  const { headers, body } = await buildAuthRequest(basic, {
-    grant_type: 'refresh_token',
-    refresh_token: cfg.refreshToken,
-    scope: 'offline_access',
+  await preLogin()
+  const response = await tlsFetch(CR_AUTH, {
+    method: 'POST',
+    headers: {
+      Authorization: runtime.basicAuth,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': runtime.userAgent,
+      'ETP-Anonymous-ID': runtime.anonId,
+      Cookie: runtime.cookies,
+    },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: cfg.refreshToken,
+      scope: 'offline_access',
+      device_id: getDeviceId(),
+      device_type: 'ANDROIDTV',
+    }).toString(),
+    signal: AbortSignal.timeout(15_000),
   })
-  let response
-  try {
-    response = await proxyFetch(CR_AUTH, { method: 'POST', headers, body, signal: AbortSignal.timeout(15_000) })
-  } catch (error) {
-    throw netError(error)
-  }
-  if (!response.ok) {
-    const raw = await response.text().catch(() => '')
-    throw new Error(describeAuthError(response.status, raw, 'refresh'))
-  }
+  if (!response.ok) throw new Error(`Refresh HTTP ${response.status}`)
   const data = await response.json()
   cfg.accessToken = data.access_token
   cfg.refreshToken = data.refresh_token || cfg.refreshToken
@@ -559,7 +442,7 @@ async function crFetch(endpoint, params = {}, base = CR_BASE, timeoutMs = 20_000
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const token = await getToken()
-    const response = await proxyFetch(url, {
+    const response = await tlsFetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
         'User-Agent': sessionUA(loadCfg()),
@@ -798,30 +681,27 @@ async function runLogin({ msg, sock, args, isOwner }) {
   const usageText = `💡 Uso: ${CR_PREFIX}crlogin correo contraseña\nO: ${CR_PREFIX}crlogin etp_rt`
   if (!first) return msg.reply(usageText)
   const tokenLogin = !password
-  if (!tokenLogin && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(first)) return msg.reply(`⚠️ El correo no parece válido.\n${usageText}`)
-  if (tokenLogin && !parseEtpRt(args.join(' '))) return msg.reply(`⚠️ El valor no parece una cookie etp_rt válida.\n${usageText}`)
+  if (tokenLogin && (first.includes('@') || !/^[A-Za-z0-9._~-]{8,256}$/.test(first))) return msg.reply(usageText)
   await msg.delete?.().catch(() => {})
   await msg.react?.('⏳').catch(() => {})
   try {
-    if (tokenLogin) await loginWithEtpRt(args.join(' '))
+    if (tokenLogin) await loginWithEtpRt(first)
     else await loginWithAccount(first, password)
     const cfg = loadCfg()
     cfg.cronDisabled = false
     saveCfg(cfg)
     startCron(sock)
     await msg.react?.('✅').catch(() => {})
-    await msg.reply('✅ Sesión de Crunchyroll iniciada.')
   } catch (error) {
     console.error('[CR-Notify] Login:', error.message)
     await msg.react?.('❎').catch(() => {})
-    await msg.reply(`❌ Login falló: ${error.message}`)
   }
 }
 
 async function runLogout({ msg, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño.')
   const cfg = loadCfg()
-  for (const key of ['accessToken', 'refreshToken', 'tokenExp', 'accountId', 'loggedIn', 'authMode', 'etpRt', 'authBasic']) delete cfg[key]
+  for (const key of ['accessToken', 'refreshToken', 'tokenExp', 'accountId', 'loggedIn', 'authMode', 'etpRt']) delete cfg[key]
   saveCfg(cfg)
   runtime.token = null
   runtime.tokenExp = 0
@@ -950,7 +830,8 @@ async function runDiag({ msg, isOwner }) {
   try {
     await refreshCredentials()
     lines.push(`📡 Credenciales: *${runtime.credentialCache.source}*`)
-    lines.push(`🔐 Basic Auth: *${ENV_BASIC_AUTH ? 'personalizada' : runtime.credentialCache.source}*`)
+    lines.push(`🔒 TLS: *${wreq ? `wreq-js (${TLS_PROFILE_TV} / ${TLS_PROFILE_WEB})` : 'fetch nativo'}*`)
+    lines.push(`🔐 Basic Auth: *${runtime.basicAuth === NX_BASIC ? 'nx' : 'personalizada'}*`)
     lines.push(`🧭 User-Agent: \`${runtime.userAgent.slice(0, 48)}...\``)
     try {
       const token = await getAnonToken()

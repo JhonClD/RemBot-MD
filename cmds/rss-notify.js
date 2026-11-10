@@ -148,9 +148,32 @@ function isHttpUrl(u) {
   return typeof u === 'string' && /^https?:\/\//i.test(u)
 }
 
-function extractFirstImgSrc(html = '') {
-  const m = html.match(/<img[^>]+src=["']([^"'>]+)["']/i)
-  return m ? m[1] : null
+function decodeXmlEntities(value = '') {
+  return String(value)
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .trim()
+}
+
+function extractHtmlImageUrls(html = '') {
+  const urls = []
+  const add = value => {
+    const url = decodeXmlEntities(value)
+    if (url && !urls.includes(url)) urls.push(url)
+  }
+  for (const match of String(html).matchAll(/<img\b[^>]*>/gi)) {
+    const tag = match[0]
+    for (const attr of ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-image']) {
+      const found = tag.match(new RegExp(`\\b${attr}\\s*=\\s*["']([^"']+)`, 'i'))
+      if (found) add(found[1])
+    }
+    const srcset = tag.match(/\bsrcset\s*=\s*["']([^"']+)/i)
+    if (srcset) add(srcset[1].split(',')[0].trim().split(/\s+/)[0])
+  }
+  return urls
 }
 
 function cleanDesc(raw) {
@@ -233,39 +256,41 @@ async function fetchFeed(url) {
 
   const extractMedia = (el, desc = '') => {
     const raw = $.html(el)
-    let img = null, video = null
-
-    const encVid = raw.match(/<enclosure[^>]+type=["']video[^"']*["'][^>]+url=["']([^"']+)["']/i)
-                || raw.match(/<enclosure[^>]+url=["']([^"']+)["'][^>]+type=["']video[^"']*["']/i)
-    if (encVid) video = encVid[1]
-    const encImg = raw.match(/<enclosure[^>]+type=["']image[^"']*["'][^>]+url=["']([^"']+)["']/i)
-                || raw.match(/<enclosure[^>]+url=["']([^"']+)["'][^>]+type=["']image[^"']*["']/i)
-    if (encImg) img = encImg[1]
-
-    if (!img) {
-      const m = raw.match(new RegExp(`<${mediaPrefix}:thumbnail[^>]+url=["']([^"']+)["']`, 'i'))
-      if (m) img = m[1]
+    const images = []
+    const videos = []
+    const add = (list, value) => {
+      const rawUrl = decodeXmlEntities(value)
+      if (!rawUrl) return
+      let resolved = rawUrl
+      try { resolved = new URL(rawUrl, url).href } catch {}
+      if (resolved && !list.includes(resolved)) list.push(resolved)
     }
-    if (!video) {
+    const tags = [...raw.matchAll(/<(?:[\w-]+:)?(?:enclosure|content|thumbnail|image|img)\b[^>]*>/gi)]
+    for (const match of tags) {
+      const tag = match[0]
+      const url = tag.match(/\burl\s*=\s*["']([^"']+)/i)?.[1]
+        || tag.match(/\bsrc\s*=\s*["']([^"']+)/i)?.[1]
+        || tag.match(/\bhref\s*=\s*["']([^"']+)/i)?.[1]
+      if (!url) continue
+      const type = (tag.match(/\btype\s*=\s*["']([^"']+)/i)?.[1] || '').toLowerCase()
+      const medium = (tag.match(/\bmedium\s*=\s*["']([^"']+)/i)?.[1] || '').toLowerCase()
+      const isVideo = type.startsWith('video/') || medium === 'video' || /\.(?:mp4|webm|mov)(?:[?#]|$)/i.test(url)
+      const isImage = type.startsWith('image/') || medium === 'image' || /\.(?:jpe?g|png|gif|webp|avif)(?:[?#]|$)/i.test(url)
+      if (isVideo) add(videos, url)
+      else if (isImage || /enclosure|thumbnail|image/i.test(tag)) add(images, url)
+    }
+    if (!videos.length) {
       const m = raw.match(new RegExp(`<${mediaPrefix}:content[^>]+medium=["']video["'][^>]+url=["']([^"']+)["']`, 'i'))
              || raw.match(new RegExp(`<${mediaPrefix}:content[^>]+url=["']([^"']+\\.(?:mp4|webm|mov))[^"']*["']`, 'i'))
-      if (m) video = m[1]
+      if (m) add(videos, m[1])
     }
-    if (!img) {
-      const m = raw.match(new RegExp(`<${mediaPrefix}:content[^>]+url=["']([^"']+\\.(?:jpe?g|png|gif|webp))[^"']*["']`, 'i'))
-             || raw.match(new RegExp(`<${mediaPrefix}:content[^>]+medium=["']image["'][^>]+url=["']([^"']+)["']`, 'i'))
-      if (m) img = m[1]
-    }
-    if (!img) {
-      const m = raw.match(new RegExp(`<${contentPrefix}:encoded[^>]*>([\\s\\S]*?)<\\/${contentPrefix}:encoded>`, 'i'))
-      if (m) img = extractFirstImgSrc(m[1])
-    }
-    if (!img) img = extractFirstImgSrc(desc)
-
-    if (img && !isHttpUrl(img)) img = null
-    if (video && !isHttpUrl(video)) video = null
-
-    return { img, video }
+    const encoded = raw.match(new RegExp(`<${contentPrefix}:encoded[^>]*>([\\s\\S]*?)<\\/${contentPrefix}:encoded>`, 'i'))?.[1] || ''
+    for (const url of [...extractHtmlImageUrls(encoded), ...extractHtmlImageUrls(desc)]) add(images, url)
+    const imageHref = raw.match(/<(?:itunes:)?image\b[^>]+href=["']([^"']+)/i)?.[1]
+    if (imageHref) add(images, imageHref)
+    const video = videos.find(isHttpUrl) || null
+    const validImages = images.filter(isHttpUrl)
+    return { img: validImages[0] || null, images: validImages, video }
   }
 
   const extractDesc = (el, primaryText) => {
@@ -296,8 +321,8 @@ async function fetchFeed(url) {
     const pubDate = extractDate(el)
     const descTxt = txt($(el).find('description').first())
     const desc    = extractDesc(el, descTxt)
-    const { img, video } = extractMedia(el, descTxt)
-    if (title && guid) items.push({ title, link, guid, pubDate, img, video, desc })
+    const { img, images, video } = extractMedia(el, descTxt)
+    if (title && guid) items.push({ title, link, guid, pubDate, img, images, video, desc })
   })
 
   if (!items.length) {
@@ -309,8 +334,8 @@ async function fetchFeed(url) {
       const pubDate = txt($(el).find('published').first()) || txt($(el).find('updated').first())
       const content = txt($(el).find('content').first()) || txt($(el).find('summary').first())
       const desc    = extractDesc(el, content)
-      const { img, video } = extractMedia(el, content)
-      if (title && guid) items.push({ title, link, guid, pubDate, img, video, desc })
+      const { img, images, video } = extractMedia(el, content)
+      if (title && guid) items.push({ title, link, guid, pubDate, img, images, video, desc })
     })
   }
 
@@ -372,22 +397,34 @@ async function sendItem(conn, chatId, feed, item, index = 0, total = 0) {
   if (item.video) {
     await conn.sendMessage(chatId, { video: { url: item.video }, caption: text, mimetype: 'video/mp4' })
   } else if (item.img) {
+    const candidates = [...new Set([...(item.images || []), item.img].filter(isHttpUrl))]
     let imageBuffer = null
-    try {
-      const imageResponse = await axios.get(item.img, {
-        responseType: 'arraybuffer',
-        timeout: REQUEST_TIMEOUT,
-        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
-      })
-      imageBuffer = Buffer.from(imageResponse.data)
-    } catch (error) {
-      console.warn(`[RSS Imagen] no se pudo descargar ${item.img}: ${error.message}`)
+    let imageUrl = item.img
+    for (const candidate of candidates) {
+      try {
+        const imageResponse = await axios.get(candidate, {
+          responseType: 'arraybuffer',
+          timeout: REQUEST_TIMEOUT,
+          maxRedirects: 5,
+          headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8' },
+          validateStatus: status => status >= 200 && status < 400,
+        })
+        const contentType = String(imageResponse.headers['content-type'] || '').toLowerCase()
+        if (contentType && !contentType.startsWith('image/')) throw new Error(`content-type ${contentType}`)
+        const buffer = Buffer.from(imageResponse.data)
+        if (!buffer.length) throw new Error('respuesta vacía')
+        imageBuffer = buffer
+        imageUrl = candidate
+        break
+      } catch (error) {
+        console.warn(`[RSS Imagen] no se pudo descargar ${candidate}: ${error.message}`)
+      }
     }
 
     if (imageBuffer) {
       await conn.sendMessage(chatId, { image: imageBuffer, caption: text })
     } else {
-      await conn.sendMessage(chatId, { image: { url: item.img }, caption: text })
+      await conn.sendMessage(chatId, { image: { url: imageUrl }, caption: text })
     }
   } else {
     await conn.sendMessage(chatId, { text })

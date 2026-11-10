@@ -88,7 +88,6 @@ function pickProfile(wanted) {
   return undefined
 }
 
-// Mantiene coherentes el User-Agent y la huella TLS: UA web -> perfil Chrome, UA de TV -> perfil OkHttp.
 async function tlsFetch(url, options = {}) {
   if (!wreq) return fetch(url, options)
   const headers = {}
@@ -447,6 +446,8 @@ async function crFetch(endpoint, params = {}, base = CR_BASE, timeoutMs = 20_000
         Authorization: `Bearer ${token}`,
         'User-Agent': sessionUA(loadCfg()),
         Accept: 'application/json',
+        'Cache-Control': 'no-cache, no-store, max-age=0',
+        Pragma: 'no-cache',
         Cookie: runtime.cookies,
       },
       signal: AbortSignal.timeout(timeoutMs),
@@ -494,21 +495,25 @@ function normalizeEpisode(item) {
     epTitle: item?.title || '',
     epNum,
     audioLocale: locale,
+    subLocales: [...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].filter((x) => typeof x === 'string'),
     image: extractImage(item?.images),
-    airTime: item?.premium_available_date || item?.availability_starts || '',
+    airTime: Date.parse(item?.premium_available_date || item?.availability_starts || item?.episode_metadata?.episode_air_date || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
   }
 }
 
 async function fetchBrowseEpisodes() {
-  const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 1, 1)))
-  const responses = await Promise.allSettled(Array.from({ length: pageCount }, (_, index) => crFetch('/content/v2/discover/browse', {
-    count: 100,
-    start: index * 100,
-    sort_by: 'newly_added',
-    type: 'episode',
-    locale: 'es-419',
-  }, CR_BETA, BROWSE_TIMEOUT_MS)))
+  const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 2, 1)))
+  const browsePage = async (index) => {
+    const params = { count: 100, start: index * 100, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
+    try {
+      return await crFetch('/content/v2/discover/browse', { ...params, _: Date.now() }, CR_BETA, BROWSE_TIMEOUT_MS)
+    } catch (error) {
+      if (!/HTTP 400/.test(error.message)) throw error
+      return crFetch('/content/v2/discover/browse', params, CR_BETA, BROWSE_TIMEOUT_MS)
+    }
+  }
+  const responses = await Promise.allSettled(Array.from({ length: pageCount }, (_, index) => browsePage(index)))
 
   const rows = []
   responses.forEach((result, index) => {
@@ -525,13 +530,14 @@ async function fetchBrowseEpisodes() {
       console.log(`[CR-Notify] Descartado: datos incompletos | ID: ${episode.id || '(vacío)'} | Serie: ${episode.series || '(vacía)'}`)
       continue
     }
-    if (!allowed.has(episode.audioLocale)) {
+    if (episode.audioLocale && !allowed.has(episode.audioLocale)) {
       console.log(`[CR-Notify] Descartado por idioma: ${episode.audioLocale || '(vacío)'} | ${episode.series} | ${episode.id}`)
       continue
     }
     accepted.push(episode)
   }
   const unique = [...new Map(accepted.map((episode) => [episode.id, episode])).values()]
+  unique.sort((x, y) => (y.airTime - x.airTime) || String(x.series).localeCompare(String(y.series)) || (Number(x.epNum) || 0) - (Number(y.epNum) || 0))
   console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados`)
   return unique
 }
@@ -554,7 +560,7 @@ async function fetchNew() {
   }
   const fresh = current.filter((episode) => !seen.includes(episode.id))
   console.log(`[CR-Notify] Revisión: ${current.length} válidos | ${fresh.length} nuevos | ${seen.length} registrados.`)
-  return fresh
+  return fresh.sort((x, y) => x.airTime - y.airTime)
 }
 
 function markSeen(id) {
@@ -565,11 +571,20 @@ function markSeen(id) {
 const FLAGS = { 'ja-JP': '🇯🇵', 'es-419': '🇲🇽', 'es-LA': '🇲🇽', 'es-ES': '🇪🇸' }
 const LOCALES = { 'ja-JP': 'Japonés', 'es-419': 'Latino', 'es-LA': 'Latino', 'es-ES': 'Castellano' }
 
+function subtitleLine(episode) {
+  if (episode.audioLocale !== 'ja-JP') return ''
+  const subs = new Set(episode.subLocales || [])
+  if (subs.has('es-419') || subs.has('es-LA')) return '> 🇲🇽 Sub Español\n'
+  if (subs.has('es-ES')) return '> 🇪🇸 Sub Español Castellano\n'
+  if ([...subs].some((code) => code.startsWith('en-'))) return '> 🇺🇸 Sub English\n'
+  return ''
+}
+
 function caption(episode) {
   const flag = FLAGS[episode.audioLocale] || '🌐'
   const language = LOCALES[episode.audioLocale] || episode.audioLocale || 'Desconocido'
   const title = episode.epTitle ? `Ep. ${episode.epNum} - ${episode.epTitle}` : `Ep. ${episode.epNum}`
-  return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n\n${episode.link}`
+  return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
 }
 
 async function sendEpisode(sock, jid, episode, quoted = null) {
@@ -613,6 +628,7 @@ function startCron(sock) {
   const minutes = Math.max(1, Math.floor(Number(minutesRaw) || 1))
   runtime.cronTimer = setInterval(() => checkAndSend(getSock(), false).catch((error) => console.error('[CR-Notify] Cron:', error.message)), minutes * 60_000)
   runtime.cronTimer.unref?.()
+  setTimeout(() => checkAndSend(getSock(), false).catch((error) => console.error('[CR-Notify] Cron:', error.message)), 10_000).unref?.()
   console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${(cfg.targetJids || []).length} grupo(s) configurado(s)`)
   console.log(`[CR-Notify] Auto-inicio | Grupos: ${(cfg.targetJids || []).length} | Modo: ${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'} | Cron: ON`)
   console.log(`[CR-Notify] Delays → JID: ${SEND_JID_DELAY_MS}ms | Ep: ${SEND_DELAY_MS}ms | Browse: ${BROWSE_TIMEOUT_MS}ms`)

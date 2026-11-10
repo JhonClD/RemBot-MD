@@ -587,8 +587,39 @@ function caption(episode) {
   return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
 }
 
+const ANILIST_TITLE_MODE = process.env.CR_ANILIST_TITLE === 'native' ? 'native' : 'romaji'
+const anilistCache = new Map()
+
+async function anilistTitle(name) {
+  const clean = String(name || '').replace(/\s*\([^)]*\)/g, '').trim()
+  if (!clean) return name
+  const key = clean.toLowerCase()
+  if (anilistCache.has(key)) return anilistCache.get(key) || name
+  let result = null
+  try {
+    const response = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        query: 'query ($search: String) { Media(search: $search, type: ANIME, sort: SEARCH_MATCH) { title { romaji native } } }',
+        variables: { search: clean },
+      }),
+      signal: AbortSignal.timeout(6000),
+    })
+    if (response.ok) {
+      const data = await response.json()
+      const title = data?.data?.Media?.title
+      result = (ANILIST_TITLE_MODE === 'native' ? title?.native || title?.romaji : title?.romaji || title?.native) || null
+    }
+  } catch (error) {
+    console.warn(`[CR-Notify] AniList falló para "${clean}": ${error.message}`)
+  }
+  if (result) anilistCache.set(key, result)
+  return result || name
+}
+
 async function sendEpisode(sock, jid, episode, quoted = null) {
-  const text = caption(episode)
+  const text = caption({ ...episode, series: await anilistTitle(episode.series) })
   const options = quoted ? { quoted } : {}
   if (episode.image) {
     try {

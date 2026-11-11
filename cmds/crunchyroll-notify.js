@@ -69,21 +69,8 @@ function envNum(name, fallback, min = 0) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-let impit = null
-try {
-  const { Impit } = await import('impit')
-  impit = new Impit({ browser: 'chrome' })
-} catch {
-  console.warn('[CR-Notify] impit no está instalado; usando fetch nativo (Cloudflare puede bloquear). Instala con: npm i impit')
-}
-
 async function tlsFetch(url, options = {}) {
-  if (!impit) return fetch(url, options)
-  const headers = {}
-  for (const [key, value] of Object.entries(options.headers || {})) {
-    if (value !== undefined && value !== null && value !== '') headers[key] = value
-  }
-  return impit.fetch(url, { ...options, headers })
+  return fetch(url, options)
 }
 
 function readSetCookies(response) {
@@ -901,7 +888,7 @@ async function runDiag({ msg, isOwner }) {
   try {
     await refreshCredentials()
     lines.push(`📡 Credenciales: *${runtime.credentialCache.source}*`)
-    lines.push(`🔒 HTTP/TLS: *${impit ? 'impit (Chrome)' : 'fetch nativo'}*`)
+    lines.push('🔒 HTTP/TLS: *fetch nativo*')
     lines.push(`🔐 Basic Auth: *${runtime.basicAuth === NX_BASIC ? 'nx' : 'personalizada'}*`)
     lines.push(`🧭 User-Agent: \`${runtime.userAgent.slice(0, 48)}...\``)
     try {

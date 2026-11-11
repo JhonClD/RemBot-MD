@@ -480,14 +480,45 @@ function extractImage(images = {}) {
   return candidates.sort((a, b) => b.size - a.size)[0]?.source || ''
 }
 
+const LOCALE_ALIASES = {
+  'es-419': 'es-419', 'es-la': 'es-419', 'es-mx': 'es-419', 'es-latam': 'es-419', 'es-us': 'es-419', 'es-ar': 'es-419', 'es-co': 'es-419', 'es-cl': 'es-419', 'es-pe': 'es-419',
+  'es-es': 'es-ES', es: 'es-ES',
+  ja: 'ja-JP', 'ja-jp': 'ja-JP',
+}
+
+function normalizeLocale(code) {
+  if (typeof code !== 'string') return ''
+  const raw = code.trim().replace(/_/g, '-')
+  if (!raw) return ''
+  const key = raw.toLowerCase()
+  if (LOCALE_ALIASES[key]) return LOCALE_ALIASES[key]
+  const [lang, region] = raw.split('-')
+  return region ? `${lang.toLowerCase()}-${region.length === 2 ? region.toUpperCase() : region}` : lang.toLowerCase()
+}
+
+function localeFromId(id) {
+  const match = /^[A-Z]{2}\d+([A-Z]{2})([A-Z]{2}|\d{3})$/.exec(String(id || ''))
+  if (!match) return ''
+  return normalizeLocale(`${match[1]}-${match[2]}`)
+}
+
+function detectAudioLocale(item, meta, id) {
+  const direct = normalizeLocale(item?.audio_locale) || normalizeLocale(meta.audio_locale)
+  if (direct) return direct
+  const fromId = localeFromId(id)
+  if (fromId) return fromId
+  const list = Array.isArray(meta.audio_locales) ? meta.audio_locales : []
+  return list.length === 1 ? normalizeLocale(list[0]) : ''
+}
+
 function normalizeEpisode(item) {
   const meta = item?.episode_metadata || {}
   const epNum = item?.episode_number ?? meta.episode_number ?? 'Especial'
-  const locale = item?.audio_locale || meta.audio_locale || meta.audio_locales?.[0] || ''
   const season = item?.season_title || meta.season_title || ''
   let series = item?.series_title || meta.series_title || item?.title || 'Anime desconocido'
   if (season && series && !series.includes(season) && !season.startsWith(series)) series += ` ${season}`
   const id = item?.id || ''
+  const locale = detectAudioLocale(item, meta, id)
   const slug = item?.slug_title || meta.slug_title || ''
   return {
     id,
@@ -495,7 +526,7 @@ function normalizeEpisode(item) {
     epTitle: item?.title || '',
     epNum,
     audioLocale: locale,
-    subLocales: [...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].filter((x) => typeof x === 'string'),
+    subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter(Boolean))],
     image: extractImage(item?.images),
     airTime: Date.parse(item?.premium_available_date || item?.availability_starts || item?.episode_metadata?.episode_air_date || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
@@ -523,7 +554,7 @@ async function fetchBrowseEpisodes() {
   })
 
   const extraAudio = String(process.env.CR_EXTRA_AUDIO ?? 'zh-CN,zh-TW,ko-KR').split(',').map((x) => x.trim()).filter(Boolean)
-  const allowed = new Set(['ja-JP', 'es-419', 'es-LA', 'es-ES', ...extraAudio])
+  const allowed = new Set(['ja-JP', 'es-419', 'es-ES', ...extraAudio.map(normalizeLocale)])
   const normalized = rows.map(normalizeEpisode)
   const accepted = []
   const dropped = new Map()
@@ -576,9 +607,9 @@ const FLAGS = { 'ja-JP': '🇯🇵', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', '
 const LOCALES = { 'ja-JP': 'Japonés', 'zh-CN': 'Chino', 'zh-TW': 'Chino (Taiwán)', 'ko-KR': 'Coreano', 'es-419': 'Latino', 'es-LA': 'Latino', 'es-ES': 'Castellano' }
 
 function subtitleLine(episode) {
-  if (['es-419', 'es-LA', 'es-ES'].includes(episode.audioLocale)) return ''
+  if (['es-419', 'es-ES'].includes(episode.audioLocale)) return ''
   const subs = new Set(episode.subLocales || [])
-  if (subs.has('es-419') || subs.has('es-LA')) return '> 🇲🇽 Sub Español\n'
+  if (subs.has('es-419')) return '> 🇲🇽 Sub Español\n'
   if (subs.has('es-ES')) return '> 🇪🇸 Sub Español Castellano\n'
   if ([...subs].some((code) => code.startsWith('en-'))) return '> 🇺🇸 Sub English\n'
   return ''

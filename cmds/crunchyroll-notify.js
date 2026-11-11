@@ -522,23 +522,27 @@ async function fetchBrowseEpisodes() {
     else console.warn(`[CR-Notify] Página ${index} falló: ${result.reason?.message || result.reason}`)
   })
 
-  const allowed = new Set(['ja-JP', 'es-419', 'es-LA', 'es-ES'])
+  const extraAudio = String(process.env.CR_EXTRA_AUDIO ?? 'zh-CN,zh-TW,ko-KR').split(',').map((x) => x.trim()).filter(Boolean)
+  const allowed = new Set(['ja-JP', 'es-419', 'es-LA', 'es-ES', ...extraAudio])
   const normalized = rows.map(normalizeEpisode)
   const accepted = []
+  const dropped = new Map()
+  const drop = (reason) => dropped.set(reason, (dropped.get(reason) || 0) + 1)
   for (const episode of normalized) {
     if (!episode.id || !episode.series) {
-      console.log(`[CR-Notify] Descartado: datos incompletos | ID: ${episode.id || '(vacío)'} | Serie: ${episode.series || '(vacía)'}`)
+      drop('incompleto')
       continue
     }
     if (episode.audioLocale && !allowed.has(episode.audioLocale)) {
-      console.log(`[CR-Notify] Descartado por idioma: ${episode.audioLocale || '(vacío)'} | ${episode.series} | ${episode.id}`)
+      drop(episode.audioLocale)
       continue
     }
     accepted.push(episode)
   }
   const unique = [...new Map(accepted.map((episode) => [episode.id, episode])).values()]
   unique.sort((x, y) => (y.airTime - x.airTime) || String(x.series).localeCompare(String(y.series)) || (Number(x.epNum) || 0) - (Number(y.epNum) || 0))
-  console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados`)
+  const detail = dropped.size ? ` (${[...dropped].map(([reason, count]) => `${reason}:${count}`).join(', ')})` : ''
+  console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados${detail}`)
   return unique
 }
 
@@ -568,11 +572,11 @@ function markSeen(id) {
   if (!seen.includes(id)) saveSeen([...seen, id])
 }
 
-const FLAGS = { 'ja-JP': '🇯🇵', 'es-419': '🇲🇽', 'es-LA': '🇲🇽', 'es-ES': '🇪🇸' }
-const LOCALES = { 'ja-JP': 'Japonés', 'es-419': 'Latino', 'es-LA': 'Latino', 'es-ES': 'Castellano' }
+const FLAGS = { 'ja-JP': '🇯🇵', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'ko-KR': '🇰🇷', 'es-419': '🇲🇽', 'es-LA': '🇲🇽', 'es-ES': '🇪🇸' }
+const LOCALES = { 'ja-JP': 'Japonés', 'zh-CN': 'Chino', 'zh-TW': 'Chino (Taiwán)', 'ko-KR': 'Coreano', 'es-419': 'Latino', 'es-LA': 'Latino', 'es-ES': 'Castellano' }
 
 function subtitleLine(episode) {
-  if (episode.audioLocale !== 'ja-JP') return ''
+  if (['es-419', 'es-LA', 'es-ES'].includes(episode.audioLocale)) return ''
   const subs = new Set(episode.subLocales || [])
   if (subs.has('es-419') || subs.has('es-LA')) return '> 🇲🇽 Sub Español\n'
   if (subs.has('es-ES')) return '> 🇪🇸 Sub Español Castellano\n'

@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 
 const TMP_DIR = path.resolve('lib/system/tmp/cr-notify')
 const DB_PATH = path.join(TMP_DIR, 'crunchyroll-seen.json')
+const TRACKS_PATH = path.join(TMP_DIR, 'crunchyroll-tracks.json')
 const CFG_PATH = path.join(TMP_DIR, 'crunchyroll-cfg.json')
 const MAX_SEEN = 500
 
@@ -33,7 +34,7 @@ const CR_PREFIX = (process.env.BOT_PREFIX || '`').trim().split(/\s+/)[0] || '`'
 
 fs.mkdirSync(TMP_DIR, { recursive: true })
 try { fs.chmodSync(TMP_DIR, 0o700) } catch {}
-for (const file of [DB_PATH, CFG_PATH]) {
+for (const file of [DB_PATH, TRACKS_PATH, CFG_PATH]) {
   if (fs.existsSync(file)) {
     try { fs.chmodSync(file, 0o600) } catch {}
   }
@@ -132,6 +133,26 @@ function loadSeen() {
 
 function saveSeen(ids) {
   atomicWrite(DB_PATH, [...new Set(ids)].slice(-MAX_SEEN))
+}
+
+function loadTrackState() {
+  const state = loadJson(TRACKS_PATH, {})
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return {}
+  return Object.fromEntries(Object.entries(state).filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value)))
+}
+
+function saveTrackState(state) {
+  atomicWrite(TRACKS_PATH, Object.fromEntries(Object.entries(state).slice(-MAX_SEEN)))
+}
+
+function rememberEpisodeTracks(state, episode) {
+  const previous = state[episode.id] || {}
+  const subLocales = [...new Set([...(Array.isArray(previous.subLocales) ? previous.subLocales : []), ...(episode.subLocales || [])])]
+  delete state[episode.id]
+  state[episode.id] = {
+    audioLocale: episode.audioLocale || previous.audioLocale || '',
+    subLocales,
+  }
 }
 
 function isValidBasic(value) {
@@ -556,7 +577,7 @@ async function fetchBrowseEpisodes() {
         const episode = normalizeEpisode(row)
         return episode.id && episode.series && (!episode.audioLocale || allowed.has(episode.audioLocale)) && !seen.has(episode.id)
       })
-      if (!hasUnseenCandidate) {
+      if (index > 0 && !hasUnseenCandidate) {
         console.log(`[CR-Notify] Página ${index + 1} ya conocida; se detiene el paginado.`)
         break
       }
@@ -601,19 +622,56 @@ async function fetchNew() {
     return []
   }
   const seen = loadSeen()
+  const tracks = loadTrackState()
   if (!seen.length) {
     saveSeen(current.map((episode) => episode.id))
+    const baseline = {}
+    for (const episode of current) rememberEpisodeTracks(baseline, episode)
+    saveTrackState(baseline)
     console.log(`[CR-Notify] Caché inicial sembrado con ${current.length} episodios.`)
     return []
   }
-  const fresh = current.filter((episode) => !seen.includes(episode.id))
-  console.log(`[CR-Notify] Revisión: ${current.length} válidos | ${fresh.length} nuevos | ${seen.length} registrados.`)
-  return fresh.sort((x, y) => x.airTime - y.airTime)
+  const seenIds = new Set(seen)
+  const notifications = []
+  let trackUpdates = 0
+  let trackStateChanged = false
+  for (const episode of current) {
+    if (!seenIds.has(episode.id)) {
+      notifications.push({ type: 'episode', episode })
+      continue
+    }
+    const previous = tracks[episode.id]
+    if (!previous) {
+      // Caché de idiomas nueva: registra lo actual sin generar avisos retroactivos.
+      rememberEpisodeTracks(tracks, episode)
+      trackStateChanged = true
+      continue
+    }
+    const previousSubs = new Set(Array.isArray(previous.subLocales) ? previous.subLocales : [])
+    const addedSubLocales = (episode.subLocales || []).filter((locale) => !previousSubs.has(locale))
+    const addedAudioLocale = episode.audioLocale && previous.audioLocale !== episode.audioLocale
+      ? episode.audioLocale
+      : ''
+    if (addedSubLocales.length || addedAudioLocale) {
+      notifications.push({ type: 'tracks', episode, addedSubLocales, addedAudioLocale })
+      trackUpdates++
+    }
+  }
+  if (trackStateChanged) saveTrackState(tracks)
+  const newEpisodes = notifications.filter((item) => item.type === 'episode').length
+  console.log(`[CR-Notify] Revisión: ${current.length} válidos | ${newEpisodes} episodios nuevos | ${trackUpdates} actualización(es) de idioma | ${seen.length} registrados.`)
+  return notifications.sort((x, y) => x.episode.airTime - y.episode.airTime)
 }
 
 function markSeen(id) {
   const seen = loadSeen()
   if (!seen.includes(id)) saveSeen([...seen, id])
+}
+
+function markTracksSeen(episode) {
+  const tracks = loadTrackState()
+  rememberEpisodeTracks(tracks, episode)
+  saveTrackState(tracks)
 }
 
 const FLAGS = { 'ja-JP': '🇯🇵', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'ko-KR': '🇰🇷', 'es-419': '🇲🇽', 'es-LA': '🇲🇽', 'es-ES': '🇪🇸' }
@@ -628,11 +686,19 @@ function subtitleLine(episode) {
   return ''
 }
 
-function caption(episode) {
+function formatLocale(locale) {
+  return `${FLAGS[locale] || '🌐'} ${LOCALES[locale] || locale || 'Desconocido'}`
+}
+
+function caption(episode, notification = null) {
   const flag = FLAGS[episode.audioLocale] || '🌐'
   const language = LOCALES[episode.audioLocale] || episode.audioLocale || 'Desconocido'
   const title = episode.epTitle ? `Ep. ${episode.epNum} - ${episode.epTitle}` : `Ep. ${episode.epNum}`
-  return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
+  const changes = []
+  if (notification?.addedAudioLocale) changes.push(`Audio: ${formatLocale(notification.addedAudioLocale)}`)
+  if (notification?.addedSubLocales?.length) changes.push(`Subtítulos: ${notification.addedSubLocales.map(formatLocale).join(', ')}`)
+  const updateLine = changes.length ? `🆕 Nuevas pistas disponibles\n${changes.join('\n')}\n\n` : ''
+  return `${updateLine}📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
 }
 
 const ANILIST_TITLE_MODE = process.env.CR_ANILIST_TITLE === 'native' ? 'native' : 'romaji'
@@ -666,8 +732,8 @@ async function anilistTitle(name) {
   return result || name
 }
 
-async function sendEpisode(sock, jid, episode, quoted = null) {
-  const text = caption({ ...episode, series: await anilistTitle(episode.series) })
+async function sendEpisode(sock, jid, episode, quoted = null, notification = null) {
+  const text = caption({ ...episode, series: await anilistTitle(episode.series) }, notification)
   const options = quoted ? { quoted } : {}
   if (episode.image) {
     try {
@@ -727,11 +793,12 @@ async function checkAndSend(sock, manual = false) {
       const episodes = await fetchNew()
       if (!episodes.length) return 0
       let sent = 0
-      for (const episode of episodes) {
+      for (const notification of episodes) {
+        const episode = notification.episode
         let successful = 0
         for (const jid of jids) {
           try {
-            await sendEpisode(sock, jid, episode)
+            await sendEpisode(sock, jid, episode, null, notification)
             successful++
             if (SEND_JID_DELAY_MS) await delay(SEND_JID_DELAY_MS)
           } catch (error) {
@@ -740,11 +807,12 @@ async function checkAndSend(sock, manual = false) {
         }
         if (successful === jids.length) {
           markSeen(episode.id)
+          markTracksSeen(episode)
           sent++
         }
         if (SEND_DELAY_MS) await delay(SEND_DELAY_MS)
       }
-      console.log(`[CR-Notify] ${sent}/${episodes.length} episodio(s) enviados a ${jids.length} grupo(s).`)
+      console.log(`[CR-Notify] ${sent}/${episodes.length} notificación(es) enviadas a ${jids.length} grupo(s).`)
       return sent
     })
   } finally {
@@ -831,6 +899,7 @@ async function runRemove({ msg, sock, isOwner }) {
 async function runStatus({ msg }) {
   const cfg = loadCfg()
   const seen = loadSeen()
+  const trackedLanguages = Object.keys(loadTrackState()).length
   const minutes = Math.max(1, Math.floor(Number(cfg.minutes || process.env.CR_MINUTES || 1) || 1))
   const exp = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
   const groups = cfg.targetJids.length ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${jid}`).join('\n') : `  Ninguno — usa ${CR_PREFIX}crset`
@@ -842,6 +911,7 @@ async function runStatus({ msg }) {
     `⏱️ Cron: cada *${minutes} min*\n` +
     `🔄 Cron activo: *${runtime.cronTimer ? 'Sí' : (cfg.cronDisabled ? 'Detenido' : 'No')}*\n` +
     `💾 Episodios registrados: *${seen.length}*\n` +
+    `🈯 Episodios con idiomas registrados: *${trackedLanguages}*\n` +
     `🔐 Credenciales: *${runtime.credentialCache.source}*\n\n` +
     `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${groups}`
   )

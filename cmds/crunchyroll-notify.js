@@ -5,7 +5,7 @@ import crypto from 'node:crypto'
 const TMP_DIR = path.resolve('lib/system/tmp/cr-notify')
 const DB_PATH = path.join(TMP_DIR, 'crunchyroll-seen.json')
 const CFG_PATH = path.join(TMP_DIR, 'crunchyroll-cfg.json')
-const MAX_SEEN = 500
+const MAX_SEEN = 1000
 
 const CR_BASE = 'https://www.crunchyroll.com'
 const CR_BETA = 'https://beta-api.crunchyroll.com'
@@ -528,7 +528,7 @@ function normalizeEpisode(item) {
     audioLocale: locale,
     subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter(Boolean))],
     image: extractImage(item?.images),
-    airTime: Date.parse(item?.premium_available_date || item?.availability_starts || item?.episode_metadata?.episode_air_date || '') || 0,
+    airTime: Date.parse(meta.episode_air_date || item?.premium_available_date || item?.availability_starts || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
   }
 }
@@ -536,7 +536,7 @@ function normalizeEpisode(item) {
 async function fetchBrowseEpisodes() {
   const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 4, 1)))
   const browsePage = async (index) => {
-    const params = { count: 100, start: index * 100, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
+    const params = { count: 100, start: index * 100, sort_by: 'newly_added', type: 'episode' }
     try {
       return await crFetch('/content/v2/discover/browse', { ...params, _: Date.now() }, CR_BETA, BROWSE_TIMEOUT_MS)
     } catch (error) {
@@ -627,39 +627,8 @@ function caption(episode) {
   return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
 }
 
-const ANILIST_TITLE_MODE = process.env.CR_ANILIST_TITLE === 'native' ? 'native' : 'romaji'
-const anilistCache = new Map()
-
-async function anilistTitle(name) {
-  const clean = String(name || '').replace(/\s*\([^)]*\)/g, '').trim()
-  if (!clean) return name
-  const key = clean.toLowerCase()
-  if (anilistCache.has(key)) return anilistCache.get(key) || name
-  let result = null
-  try {
-    const response = await fetch('https://graphql.anilist.co', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        query: 'query ($search: String) { Media(search: $search, type: ANIME, sort: SEARCH_MATCH) { title { romaji native } } }',
-        variables: { search: clean },
-      }),
-      signal: AbortSignal.timeout(6000),
-    })
-    if (response.ok) {
-      const data = await response.json()
-      const title = data?.data?.Media?.title
-      result = (ANILIST_TITLE_MODE === 'native' ? title?.native || title?.romaji : title?.romaji || title?.native) || null
-    }
-  } catch (error) {
-    console.warn(`[CR-Notify] AniList falló para "${clean}": ${error.message}`)
-  }
-  if (result) anilistCache.set(key, result)
-  return result || name
-}
-
 async function sendEpisode(sock, jid, episode, quoted = null) {
-  const text = caption({ ...episode, series: await anilistTitle(episode.series) })
+  const text = caption(episode)
   const options = quoted ? { quoted } : {}
   if (episode.image) {
     try {

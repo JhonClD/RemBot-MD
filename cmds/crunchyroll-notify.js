@@ -492,14 +492,28 @@ const LOCALE_ALIASES = {
   'es-419': 'es-419', 'es-la': 'es-419', 'es-mx': 'es-419', 'es-latam': 'es-419', 'es-us': 'es-419', 'es-ar': 'es-419', 'es-co': 'es-419', 'es-cl': 'es-419', 'es-pe': 'es-419',
   'es-es': 'es-ES', es: 'es-ES',
   ja: 'ja-JP', 'ja-jp': 'ja-JP',
+  zh: 'zh-CN', 'zh-cn': 'zh-CN', 'zh-hans': 'zh-CN', 'zh-sg': 'zh-CN', 'zh-my': 'zh-CN',
+  'zh-tw': 'zh-TW', 'zh-hant': 'zh-TW', 'zh-hk': 'zh-TW',
+}
+
+const LOCALE_LABELS = {
+  'castilian': 'es-ES', castellano: 'es-ES', 'espanol espana': 'es-ES', 'español españa': 'es-ES', 'spanish spain': 'es-ES',
+  'latin spanish': 'es-419', 'latam spanish': 'es-419', 'spanish latin america': 'es-419', 'espanol latino': 'es-419', 'español latino': 'es-419',
+  japanese: 'ja-JP', japonés: 'ja-JP', japones: 'ja-JP',
+  chinese: 'zh-CN', chino: 'zh-CN', 'simplified chinese': 'zh-CN', 'traditional chinese': 'zh-TW',
+}
+
+function localeKey(value) {
+  return String(value).trim().replace(/_/g, '-').replace(/[()]/g, '').replace(/\s+/g, ' ').toLowerCase()
 }
 
 function normalizeLocale(code) {
   if (typeof code !== 'string') return ''
   const raw = code.trim().replace(/_/g, '-')
   if (!raw) return ''
-  const key = raw.toLowerCase()
+  const key = localeKey(raw)
   if (LOCALE_ALIASES[key]) return LOCALE_ALIASES[key]
+  if (LOCALE_LABELS[key]) return LOCALE_LABELS[key]
   const [lang, region] = raw.split('-')
   return region ? `${lang.toLowerCase()}-${region.length === 2 ? region.toUpperCase() : region}` : lang.toLowerCase()
 }
@@ -511,12 +525,21 @@ function localeFromId(id) {
 }
 
 function detectAudioLocale(item, meta, id) {
-  const direct = normalizeLocale(item?.audio_locale) || normalizeLocale(meta.audio_locale)
-  if (direct) return direct
+  const directValues = [
+    item?.audio_locale, item?.audioLocale, item?.audio_language, item?.audioLanguage, item?.locale,
+    meta.audio_locale, meta.audioLocale, meta.audio_language, meta.audioLanguage, meta.locale,
+  ]
+  for (const value of directValues) {
+    const direct = normalizeLocale(value)
+    if (direct) return direct
+  }
   const fromId = localeFromId(id)
   if (fromId) return fromId
-  const list = Array.isArray(meta.audio_locales) ? meta.audio_locales : []
-  return list.length === 1 ? normalizeLocale(list[0]) : ''
+  const lists = [item?.audio_locales, item?.audioLocales, meta.audio_locales, meta.audioLocales, meta.audio_languages, meta.audioLanguages]
+  const list = lists.find((value) => Array.isArray(value) && value.length) || []
+  if (list.length === 1) return normalizeLocale(list[0])
+  const supported = list.map(normalizeLocale).filter((locale) => ['ja-JP', 'es-419', 'es-ES', 'zh-CN', 'zh-TW', 'ko-KR'].includes(locale))
+  return supported.length === 1 ? supported[0] : ''
 }
 
 function normalizeEpisode(item) {

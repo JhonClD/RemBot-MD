@@ -69,8 +69,21 @@ function envNum(name, fallback, min = 0) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+let impit = null
+try {
+  const { Impit } = await import('impit')
+  impit = new Impit({ browser: 'chrome' })
+} catch {
+  console.warn('[CR-Notify] impit no está instalado; usando fetch nativo (Cloudflare puede bloquear). Instala con: npm i impit')
+}
+
 async function tlsFetch(url, options = {}) {
-  return fetch(url, options)
+  if (!impit) return fetch(url, options)
+  const headers = {}
+  for (const [key, value] of Object.entries(options.headers || {})) {
+    if (value !== undefined && value !== null && value !== '') headers[key] = value
+  }
+  return impit.fetch(url, { ...options, headers })
 }
 
 function readSetCookies(response) {
@@ -456,7 +469,7 @@ function extractImage(images = {}) {
 
 const LOCALE_ALIASES = {
   'es-419': 'es-419', 'es-la': 'es-419', 'es-mx': 'es-419', 'es-latam': 'es-419', 'es-us': 'es-419', 'es-ar': 'es-419', 'es-co': 'es-419', 'es-cl': 'es-419', 'es-pe': 'es-419',
-  'es-es': 'es-ES', es: 'es-419',
+  'es-es': 'es-ES', es: 'es-ES',
   ja: 'ja-JP', 'ja-jp': 'ja-JP',
 }
 
@@ -500,6 +513,7 @@ function normalizeEpisode(item) {
     epTitle: item?.title || '',
     epNum,
     audioLocale: locale,
+    subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter(Boolean))],
     image: extractImage(item?.images),
     airTime: Date.parse(item?.premium_available_date || item?.availability_starts || item?.episode_metadata?.episode_air_date || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
@@ -584,11 +598,20 @@ function markSeen(id) {
 const FLAGS = { 'ja-JP': '🇯🇵', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'ko-KR': '🇰🇷', 'es-419': '🇲🇽', 'es-LA': '🇲🇽', 'es-ES': '🇪🇸' }
 const LOCALES = { 'ja-JP': 'Japonés', 'zh-CN': 'Chino', 'zh-TW': 'Chino (Taiwán)', 'ko-KR': 'Coreano', 'es-419': 'Latino', 'es-LA': 'Latino', 'es-ES': 'Castellano' }
 
+function subtitleLine(episode) {
+  if (['es-419', 'es-ES'].includes(episode.audioLocale)) return ''
+  const subs = new Set(episode.subLocales || [])
+  if (subs.has('es-419')) return '> 🇲🇽 Sub Español\n'
+  if (subs.has('es-ES')) return '> 🇪🇸 Sub Español Castellano\n'
+  if ([...subs].some((code) => code.startsWith('en-'))) return '> 🇺🇸 Sub English\n'
+  return ''
+}
+
 function caption(episode) {
   const flag = FLAGS[episode.audioLocale] || '🌐'
   const language = LOCALES[episode.audioLocale] || episode.audioLocale || 'Desconocido'
   const title = episode.epTitle ? `Ep. ${episode.epNum} - ${episode.epTitle}` : `Ep. ${episode.epNum}`
-  return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${episode.link}`
+  return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
 }
 
 const ANILIST_TITLE_MODE = process.env.CR_ANILIST_TITLE === 'native' ? 'native' : 'romaji'
@@ -888,7 +911,7 @@ async function runDiag({ msg, isOwner }) {
   try {
     await refreshCredentials()
     lines.push(`📡 Credenciales: *${runtime.credentialCache.source}*`)
-    lines.push('🔒 HTTP/TLS: *fetch nativo*')
+    lines.push(`🔒 HTTP/TLS: *${impit ? 'impit (Chrome)' : 'fetch nativo'}*`)
     lines.push(`🔐 Basic Auth: *${runtime.basicAuth === NX_BASIC ? 'nx' : 'personalizada'}*`)
     lines.push(`🧭 User-Agent: \`${runtime.userAgent.slice(0, 48)}...\``)
     try {

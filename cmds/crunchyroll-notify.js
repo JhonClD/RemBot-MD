@@ -69,34 +69,21 @@ function envNum(name, fallback, min = 0) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-let wreq = null
+let impit = null
 try {
-  wreq = await import('wreq-js')
+  const { Impit } = await import('impit')
+  impit = new Impit({ browser: 'chrome' })
 } catch {
-  console.warn('[CR-Notify] wreq-js no está instalado; usando fetch nativo (Cloudflare puede bloquear). Instala con: npm i wreq-js')
-}
-
-const TLS_PROFILE_TV = (process.env.CR_TLS_PROFILE_TV || 'okhttp_4_12').trim()
-const TLS_PROFILE_WEB = (process.env.CR_TLS_PROFILE_WEB || 'chrome_124').trim()
-let knownProfiles = null
-
-function pickProfile(wanted) {
-  if (!wreq) return undefined
-  try { knownProfiles ??= new Set(wreq.getProfiles?.() || []) } catch { knownProfiles = new Set() }
-  if (!knownProfiles.size || knownProfiles.has(wanted)) return wanted
-  console.warn(`[CR-Notify] Perfil TLS "${wanted}" no existe en wreq-js; usando el predeterminado de la librería.`)
-  return undefined
+  console.warn('[CR-Notify] impit no está instalado; usando fetch nativo (Cloudflare puede bloquear). Instala con: npm i impit')
 }
 
 async function tlsFetch(url, options = {}) {
-  if (!wreq) return fetch(url, options)
+  if (!impit) return fetch(url, options)
   const headers = {}
   for (const [key, value] of Object.entries(options.headers || {})) {
     if (value !== undefined && value !== null && value !== '') headers[key] = value
   }
-  const web = headers['User-Agent'] === WEB_UA
-  const browser = pickProfile(web ? TLS_PROFILE_WEB : TLS_PROFILE_TV)
-  return wreq.fetch(url, { ...options, headers, ...(browser ? { browser } : {}) })
+  return impit.fetch(url, { ...options, headers })
 }
 
 function readSetCookies(response) {
@@ -760,6 +747,12 @@ function usage(command = 'crnotify') {
   return `Uso: ${CR_PREFIX}${command} [1-50]`
 }
 
+function parseNotifyLimit(args) {
+  const raw = args?.[0]
+  const limit = raw === undefined ? 1 : Math.min(50, Number(raw))
+  return Number.isInteger(limit) && limit >= 1 ? limit : null
+}
+
 async function runLogin({ msg, sock, args, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño puede iniciar sesión en Crunchyroll.')
   if (msg.isGroup) return msg.reply(`⛔ Usa ${CR_PREFIX}crlogin únicamente por privado.`)
@@ -833,11 +826,13 @@ async function runStatus({ msg }) {
   )
 }
 
-async function runList({ msg, sock, isOwner }) {
+async function runList({ msg, sock, args, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño.')
+  const limit = parseNotifyLimit(args)
+  if (limit === null) return msg.reply(usage('crlist'))
   await msg.react?.('⏳').catch(() => {})
   try {
-    const episodes = await fetchLatest().then((items) => items.slice(0, 10))
+    const episodes = (await fetchLatest()).slice(0, limit)
     if (!episodes.length) return msg.reply('📭 No se encontraron episodios recientes.')
     for (const episode of episodes) {
       await sendEpisode(sock, msg.chat, episode, msg)
@@ -852,9 +847,8 @@ async function runList({ msg, sock, isOwner }) {
 
 async function runNotify({ msg, sock, args, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño.')
-  const raw = args[0]
-  const limit = raw === undefined ? 1 : Math.min(50, Number(raw))
-  if (!Number.isInteger(limit) || limit < 1) return msg.reply(usage())
+  const limit = parseNotifyLimit(args)
+  if (limit === null) return msg.reply(usage())
   const cfg = loadCfg()
   const jids = cfg.targetJids.length ? cfg.targetJids : [msg.chat]
   await msg.react?.('⏳').catch(() => {})
@@ -917,7 +911,7 @@ async function runDiag({ msg, isOwner }) {
   try {
     await refreshCredentials()
     lines.push(`📡 Credenciales: *${runtime.credentialCache.source}*`)
-    lines.push(`🔒 TLS: *${wreq ? `wreq-js (${TLS_PROFILE_TV} / ${TLS_PROFILE_WEB})` : 'fetch nativo'}*`)
+    lines.push(`🔒 HTTP/TLS: *${impit ? 'impit (Chrome)' : 'fetch nativo'}*`)
     lines.push(`🔐 Basic Auth: *${runtime.basicAuth === NX_BASIC ? 'nx' : 'personalizada'}*`)
     lines.push(`🧭 User-Agent: \`${runtime.userAgent.slice(0, 48)}...\``)
     try {
@@ -946,7 +940,7 @@ async function runCommand({ msg, sock, command, args, isOwner }) {
   if (command === 'crset') return runSet({ msg, sock, isOwner })
   if (command === 'crrem') return runRemove({ msg, sock, isOwner })
   if (command === 'crstatus') return runStatus({ msg })
-  if (command === 'crlist') return runList({ msg, sock, isOwner })
+  if (command === 'crlist') return runList({ msg, sock, args, isOwner })
   if (command === 'crnotify') return runNotify({ msg, sock, args, isOwner })
   if (command === 'crstop') return runStop({ msg, isOwner })
   if (command === 'crstart') return runStart({ msg, sock, isOwner })

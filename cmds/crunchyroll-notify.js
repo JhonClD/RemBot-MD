@@ -515,7 +515,7 @@ function normalizeEpisode(item) {
     audioLocale: locale,
     subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter(Boolean))],
     image: extractImage(item?.images),
-    airTime: Date.parse(item?.premium_available_date || item?.availability_starts || item?.episode_metadata?.episode_air_date || '') || 0,
+    airTime: Date.parse(meta.episode_air_date || item?.episode_air_date || item?.premium_available_date || item?.availability_starts || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
   }
 }
@@ -524,6 +524,7 @@ async function fetchBrowseEpisodes() {
   const pageSize = 100
   const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 4, 1)))
   const browsePage = async (index) => {
+    // Browse usa newly_added para recuperar episodios publicados; episode_air_date prioriza el estreno real localmente.
     const params = { n: pageSize, start: index * pageSize, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
     try {
       return await crFetch('/content/v2/discover/browse', { ...params, _: Date.now() }, CR_BETA, BROWSE_TIMEOUT_MS)

@@ -534,7 +534,7 @@ function normalizeEpisode(item) {
 }
 
 async function fetchBrowseEpisodes() {
-  const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 2, 1)))
+  const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 4, 1)))
   const browsePage = async (index) => {
     const params = { count: 100, start: index * 100, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
     try {
@@ -574,6 +574,11 @@ async function fetchBrowseEpisodes() {
   unique.sort((x, y) => (y.airTime - x.airTime) || String(x.series).localeCompare(String(y.series)) || (Number(x.epNum) || 0) - (Number(y.epNum) || 0))
   const detail = dropped.size ? ` (${[...dropped].map(([reason, count]) => `${reason}:${count}`).join(', ')})` : ''
   console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados${detail}`)
+  const newest = normalized.filter((episode) => episode.airTime > 0 && episode.airTime <= Date.now() + 60_000).sort((x, y) => y.airTime - x.airTime)[0]
+  if (newest) {
+    const minutes = Math.max(0, Math.round((Date.now() - newest.airTime) / 60000))
+    console.log(`[CR-Notify] Más reciente del API: ${newest.series} Ep. ${newest.epNum} (${newest.audioLocale || '?'}) | hace ${minutes} min`)
+  }
   return unique
 }
 

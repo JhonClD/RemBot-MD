@@ -523,27 +523,46 @@ function normalizeEpisode(item) {
 async function fetchBrowseEpisodes() {
   const pageSize = 100
   const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 4, 1)))
+  const extraAudio = String(process.env.CR_EXTRA_AUDIO ?? 'zh-CN,zh-TW,ko-KR').split(',').map((x) => x.trim()).filter(Boolean)
+  const allowed = new Set(['ja-JP', 'es-419', 'es-ES', ...extraAudio.map(normalizeLocale)])
+  const seen = new Set(loadSeen())
   const browsePage = async (index) => {
-    // Browse usa newly_added para recuperar episodios publicados; episode_air_date prioriza el estreno real localmente.
     const params = { n: pageSize, start: index * pageSize, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
     try {
-      return await crFetch('/content/v2/discover/browse', { ...params, _: Date.now() }, CR_BETA, BROWSE_TIMEOUT_MS)
+      return await crFetch('/content/v2/discover/browse', params, CR_BASE, BROWSE_TIMEOUT_MS)
     } catch (error) {
-      if (!/HTTP 400/.test(error.message)) throw error
+      if (!/CR API HTTP (?:400|403|404|405|429|5\d\d)/.test(error.message)) throw error
+      console.warn(`[CR-Notify] Browse principal falló en página ${index + 1}; probando beta: ${error.message}`)
       return crFetch('/content/v2/discover/browse', params, CR_BETA, BROWSE_TIMEOUT_MS)
     }
   }
-  const responses = await Promise.allSettled(Array.from({ length: pageCount }, (_, index) => browsePage(index)))
-
   const rows = []
-  responses.forEach((result, index) => {
-    if (result.status === 'fulfilled') rows.push(...(Array.isArray(result.value?.data) ? result.value.data : result.value?.items || []))
-    else if (index === 0) throw result.reason
-    else console.warn(`[CR-Notify] Página ${index} falló: ${result.reason?.message || result.reason}`)
-  })
+  for (let index = 0; index < pageCount; index++) {
+    let response
+    try {
+      response = await browsePage(index)
+    } catch (error) {
+      if (index === 0) throw error
+      console.warn(`[CR-Notify] Página ${index + 1} falló; se detiene el paginado: ${error.message}`)
+      break
+    }
+    const pageRows = Array.isArray(response?.data) ? response.data : response?.items || []
+    if (!pageRows.length) break
+    rows.push(...pageRows)
+    if (pageRows.length < pageSize) break
 
-  const extraAudio = String(process.env.CR_EXTRA_AUDIO ?? 'zh-CN,zh-TW,ko-KR').split(',').map((x) => x.trim()).filter(Boolean)
-  const allowed = new Set(['ja-JP', 'es-419', 'es-ES', ...extraAudio.map(normalizeLocale)])
+    if (seen.size) {
+      const hasUnseenCandidate = pageRows.some((row) => {
+        const episode = normalizeEpisode(row)
+        return episode.id && episode.series && (!episode.audioLocale || allowed.has(episode.audioLocale)) && !seen.has(episode.id)
+      })
+      if (!hasUnseenCandidate) {
+        console.log(`[CR-Notify] Página ${index + 1} ya conocida; se detiene el paginado.`)
+        break
+      }
+    }
+  }
+
   const normalized = rows.map(normalizeEpisode)
   const accepted = []
   const dropped = new Map()

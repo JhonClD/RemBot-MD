@@ -469,7 +469,7 @@ function extractImage(images = {}) {
 
 const LOCALE_ALIASES = {
   'es-419': 'es-419', 'es-la': 'es-419', 'es-mx': 'es-419', 'es-latam': 'es-419', 'es-us': 'es-419', 'es-ar': 'es-419', 'es-co': 'es-419', 'es-cl': 'es-419', 'es-pe': 'es-419',
-  'es-es': 'es-ES', es: 'es-ES',
+  'es-es': 'es-ES', es: 'es-419',
   ja: 'ja-JP', 'ja-jp': 'ja-JP',
 }
 
@@ -481,6 +481,28 @@ function normalizeLocale(code) {
   if (LOCALE_ALIASES[key]) return LOCALE_ALIASES[key]
   const [lang, region] = raw.split('-')
   return region ? `${lang.toLowerCase()}-${region.length === 2 ? region.toUpperCase() : region}` : lang.toLowerCase()
+}
+
+function collectLocales(...values) {
+  const result = []
+  const visit = (value) => {
+    if (typeof value === 'string') {
+      result.push(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit)
+      return
+    }
+    if (value && typeof value === 'object') {
+      for (const [key, item] of Object.entries(value)) {
+        if (/^[a-z]{2}(?:[-_][a-z]{2,4})?$/i.test(key) && (item === true || item === false || item == null || typeof item === 'string')) result.push(key)
+        else visit(item)
+      }
+    }
+  }
+  values.forEach(visit)
+  return [...new Set(result.map(normalizeLocale).filter(Boolean))]
 }
 
 function localeFromId(id) {
@@ -513,7 +535,14 @@ function normalizeEpisode(item) {
     epTitle: item?.title || '',
     epNum,
     audioLocale: locale,
-    subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter(Boolean))],
+    subLocales: collectLocales(
+      item?.subtitle_locales,
+      meta.subtitle_locales,
+      item?.subtitleLocales,
+      meta.subtitleLocales,
+      item?.subtitle_languages,
+      meta.subtitle_languages,
+    ),
     image: extractImage(item?.images),
     airTime: Date.parse(item?.premium_available_date || item?.availability_starts || item?.episode_metadata?.episode_air_date || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
@@ -601,8 +630,9 @@ const LOCALES = { 'ja-JP': 'Japonés', 'zh-CN': 'Chino', 'zh-TW': 'Chino (Taiwá
 function subtitleLine(episode) {
   if (['es-419', 'es-ES'].includes(episode.audioLocale)) return ''
   const subs = new Set(episode.subLocales || [])
-  if (subs.has('es-419')) return '> 🇲🇽 Sub Español\n'
-  if (subs.has('es-ES')) return '> 🇪🇸 Sub Español Castellano\n'
+  if ([...subs].some((code) => code === 'es-419' || code === 'es-ES' || code.startsWith('es-'))) {
+    return subs.has('es-ES') ? '> 🇪🇸 Sub Español Castellano\n' : '> 🇲🇽 Sub Español\n'
+  }
   if ([...subs].some((code) => code.startsWith('en-'))) return '> 🇺🇸 Sub English\n'
   return ''
 }

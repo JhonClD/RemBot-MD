@@ -521,9 +521,10 @@ function normalizeEpisode(item) {
 }
 
 async function fetchBrowseEpisodes() {
+  const pageSize = 100
   const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 4, 1)))
   const browsePage = async (index) => {
-    const params = { count: 100, start: index * 100, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
+    const params = { n: pageSize, start: index * pageSize, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }
     try {
       return await crFetch('/content/v2/discover/browse', { ...params, _: Date.now() }, CR_BETA, BROWSE_TIMEOUT_MS)
     } catch (error) {

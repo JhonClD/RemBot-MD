@@ -502,6 +502,7 @@ const LOCALE_LABELS = {
   japanese: 'ja-JP', japonés: 'ja-JP', japones: 'ja-JP',
   chinese: 'zh-CN', chino: 'zh-CN', 'simplified chinese': 'zh-CN', 'traditional chinese': 'zh-TW',
 }
+const IGNORED_LOCALES = new Set(['zh-TW'])
 
 function localeKey(value) {
   return String(value).trim().replace(/_/g, '-').replace(/[()]/g, '').replace(/\s+/g, ' ').toLowerCase()
@@ -557,7 +558,7 @@ function normalizeEpisode(item) {
     epTitle: item?.title || '',
     epNum,
     audioLocale: locale,
-    subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter(Boolean))],
+    subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter((locale) => locale && !IGNORED_LOCALES.has(locale)))],
     image: extractImage(item?.images),
     airTime: Date.parse(meta.episode_air_date || item?.episode_air_date || item?.premium_available_date || item?.availability_starts || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
@@ -567,8 +568,8 @@ function normalizeEpisode(item) {
 async function fetchBrowseEpisodes() {
   const pageSize = 100
   const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 4, 1)))
-  const extraAudio = String(process.env.CR_EXTRA_AUDIO ?? 'zh-CN,zh-TW,ko-KR').split(',').map((x) => x.trim()).filter(Boolean)
-  const allowed = new Set(['ja-JP', 'es-419', 'es-ES', ...extraAudio.map(normalizeLocale)])
+  const extraAudio = String(process.env.CR_EXTRA_AUDIO ?? 'zh-CN,ko-KR').split(',').map((x) => x.trim()).filter(Boolean)
+  const allowed = new Set(['ja-JP', 'es-419', 'es-ES', ...extraAudio.map(normalizeLocale)].filter((locale) => !IGNORED_LOCALES.has(locale)))
   const seen = new Set(loadSeen())
   const browsePage = async (index) => {
     const params = { n: pageSize, start: index * pageSize, sort_by: 'newly_added', type: 'episode', locale: 'es-419' }

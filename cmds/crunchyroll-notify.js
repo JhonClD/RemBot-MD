@@ -483,28 +483,6 @@ function normalizeLocale(code) {
   return region ? `${lang.toLowerCase()}-${region.length === 2 ? region.toUpperCase() : region}` : lang.toLowerCase()
 }
 
-function collectLocales(...values) {
-  const result = []
-  const visit = (value) => {
-    if (typeof value === 'string') {
-      result.push(value)
-      return
-    }
-    if (Array.isArray(value)) {
-      value.forEach(visit)
-      return
-    }
-    if (value && typeof value === 'object') {
-      for (const [key, item] of Object.entries(value)) {
-        if (/^[a-z]{2}(?:[-_][a-z]{2,4})?$/i.test(key) && (item === true || item === false || item == null || typeof item === 'string')) result.push(key)
-        else visit(item)
-      }
-    }
-  }
-  values.forEach(visit)
-  return [...new Set(result.map(normalizeLocale).filter(Boolean))]
-}
-
 function localeFromId(id) {
   const match = /^[A-Z]{2}\d+([A-Z]{2})([A-Z]{2}|\d{3})$/.exec(String(id || ''))
   if (!match) return ''
@@ -535,14 +513,6 @@ function normalizeEpisode(item) {
     epTitle: item?.title || '',
     epNum,
     audioLocale: locale,
-    subLocales: collectLocales(
-      item?.subtitle_locales,
-      meta.subtitle_locales,
-      item?.subtitleLocales,
-      meta.subtitleLocales,
-      item?.subtitle_languages,
-      meta.subtitle_languages,
-    ),
     image: extractImage(item?.images),
     airTime: Date.parse(item?.premium_available_date || item?.availability_starts || item?.episode_metadata?.episode_air_date || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
@@ -627,21 +597,11 @@ function markSeen(id) {
 const FLAGS = { 'ja-JP': '🇯🇵', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'ko-KR': '🇰🇷', 'es-419': '🇲🇽', 'es-LA': '🇲🇽', 'es-ES': '🇪🇸' }
 const LOCALES = { 'ja-JP': 'Japonés', 'zh-CN': 'Chino', 'zh-TW': 'Chino (Taiwán)', 'ko-KR': 'Coreano', 'es-419': 'Latino', 'es-LA': 'Latino', 'es-ES': 'Castellano' }
 
-function subtitleLine(episode) {
-  if (['es-419', 'es-ES'].includes(episode.audioLocale)) return ''
-  const subs = new Set(episode.subLocales || [])
-  if ([...subs].some((code) => code === 'es-419' || code === 'es-ES' || code.startsWith('es-'))) {
-    return subs.has('es-ES') ? '> 🇪🇸 Sub Español Castellano\n' : '> 🇲🇽 Sub Español\n'
-  }
-  if ([...subs].some((code) => code.startsWith('en-'))) return '> 🇺🇸 Sub English\n'
-  return ''
-}
-
 function caption(episode) {
   const flag = FLAGS[episode.audioLocale] || '🌐'
   const language = LOCALES[episode.audioLocale] || episode.audioLocale || 'Desconocido'
   const title = episode.epTitle ? `Ep. ${episode.epNum} - ${episode.epTitle}` : `Ep. ${episode.epNum}`
-  return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
+  return `📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${episode.link}`
 }
 
 const ANILIST_TITLE_MODE = process.env.CR_ANILIST_TITLE === 'native' ? 'native' : 'romaji'

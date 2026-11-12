@@ -635,8 +635,8 @@ async function fetchBrowseEpisodes() {
     }
     accepted.push(episode)
   }
+  // Conserva el orden de Crunchyroll, igual que Rikka-TakaradaMD.
   const unique = [...new Map(accepted.map((episode) => [episode.id, episode])).values()]
-  unique.sort((x, y) => (y.airTime - x.airTime) || String(x.series).localeCompare(String(y.series)) || (Number(x.epNum) || 0) - (Number(y.epNum) || 0))
   const detail = dropped.size ? ` (${[...dropped].map(([reason, count]) => `${reason}:${count}`).join(', ')})` : ''
   console.log(`[CR-Notify] Browse: ${rows.length} recibidos | ${unique.length} aceptados | ${normalized.length - accepted.length} descartados${detail}`)
   const newest = normalized.filter((episode) => episode.airTime > 0 && episode.airTime <= Date.now() + 60_000).sort((x, y) => y.airTime - x.airTime)[0]

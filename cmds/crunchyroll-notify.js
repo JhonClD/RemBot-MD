@@ -520,15 +520,23 @@ function normalizeLocale(code) {
 }
 
 function localeFromId(id) {
-  const match = /^[A-Z]{2}\d+([A-Z]{2})([A-Z]{2}|\d{3})$/.exec(String(id || ''))
+  const compact = String(id || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+  const suffixAliases = {
+    ES419: 'es-419', ESLA: 'es-419', ESES: 'es-ES',
+    JAJP: 'ja-JP', ZHCN: 'zh-CN', ZHHANS: 'zh-CN', ZHTW: 'zh-TW', ZHHANT: 'zh-TW', KOKR: 'ko-KR',
+  }
+  for (const [suffix, locale] of Object.entries(suffixAliases)) {
+    if (compact.endsWith(suffix)) return locale
+  }
+  const match = /^[A-Z]{2}\d+([A-Z]{2})([A-Z]{2}|\d{3})$/.exec(compact)
   if (!match) return ''
   return normalizeLocale(`${match[1]}-${match[2]}`)
 }
 
 function detectAudioLocale(item, meta, id) {
   const directValues = [
-    item?.audio_locale, item?.audioLocale, item?.audio_language, item?.audioLanguage, item?.locale,
-    meta.audio_locale, meta.audioLocale, meta.audio_language, meta.audioLanguage, meta.locale,
+    item?.audio_locale, item?.audioLocale, item?.audio_language, item?.audioLanguage,
+    meta.audio_locale, meta.audioLocale, meta.audio_language, meta.audioLanguage,
   ]
   for (const value of directValues) {
     const direct = normalizeLocale(value)

@@ -490,10 +490,12 @@ function extractImage(images = {}) {
 
 const LOCALE_ALIASES = {
   'es-419': 'es-419', 'es-la': 'es-419', 'es-mx': 'es-419', 'es-latam': 'es-419', 'es-us': 'es-419', 'es-ar': 'es-419', 'es-co': 'es-419', 'es-cl': 'es-419', 'es-pe': 'es-419',
+  es419: 'es-419', esla: 'es-419', eses: 'es-ES',
   'es-es': 'es-ES', es: 'es-ES',
-  ja: 'ja-JP', 'ja-jp': 'ja-JP',
-  zh: 'zh-CN', 'zh-cn': 'zh-CN', 'zh-hans': 'zh-CN', 'zh-sg': 'zh-CN', 'zh-my': 'zh-CN',
-  'zh-tw': 'zh-TW', 'zh-hant': 'zh-TW', 'zh-hk': 'zh-TW',
+  ja: 'ja-JP', jajp: 'ja-JP', 'ja-jp': 'ja-JP',
+  zh: 'zh-CN', zhcn: 'zh-CN', zhhans: 'zh-CN', 'zh-cn': 'zh-CN', 'zh-hans': 'zh-CN', 'zh-sg': 'zh-CN', 'zh-my': 'zh-CN',
+  zhtw: 'zh-TW', zhhant: 'zh-TW', 'zh-tw': 'zh-TW', 'zh-hant': 'zh-TW', 'zh-hk': 'zh-TW',
+  kokr: 'ko-KR', 'ko-kr': 'ko-KR',
 }
 
 const LOCALE_LABELS = {
@@ -534,6 +536,9 @@ function localeFromId(id) {
 }
 
 function detectAudioLocale(item, meta, id) {
+  const fromId = localeFromId(id)
+  const supported = new Set(['ja-JP', 'es-419', 'es-ES', 'zh-CN', 'zh-TW', 'ko-KR'])
+  if (supported.has(fromId)) return fromId
   const directValues = [
     item?.audio_locale, item?.audioLocale, item?.audio_language, item?.audioLanguage,
     meta.audio_locale, meta.audioLocale, meta.audio_language, meta.audioLanguage,
@@ -542,13 +547,12 @@ function detectAudioLocale(item, meta, id) {
     const direct = normalizeLocale(value)
     if (direct) return direct
   }
-  const fromId = localeFromId(id)
   if (fromId) return fromId
   const lists = [item?.audio_locales, item?.audioLocales, meta.audio_locales, meta.audioLocales, meta.audio_languages, meta.audioLanguages]
   const list = lists.find((value) => Array.isArray(value) && value.length) || []
   if (list.length === 1) return normalizeLocale(list[0])
-  const supported = list.map(normalizeLocale).filter((locale) => ['ja-JP', 'es-419', 'es-ES', 'zh-CN', 'zh-TW', 'ko-KR'].includes(locale))
-  return supported.length === 1 ? supported[0] : ''
+  const supportedFromList = list.map(normalizeLocale).filter((locale) => supported.has(locale))
+  return supportedFromList.length === 1 ? supportedFromList[0] : ''
 }
 
 function normalizeEpisode(item) {

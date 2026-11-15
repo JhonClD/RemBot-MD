@@ -185,9 +185,34 @@ _💙 ʀᴇᴍ ᴇsᴛá ʟɪsᴛᴀ ᴘᴀʀᴀ sᴇʀᴠɪʀᴛᴇ._`
   }
 }
 
+async function sendPing({ msg, sock }) {
+  const started = performance.now()
+  try {
+    const response = await msg.reply('🏓 Midiendo el tiempo de respuesta de WhatsApp...')
+    const ping = Math.round(performance.now() - started)
+    const text = `🏓 Tiempo de respuesta de WhatsApp: *${ping} ms*`
+    if (response?.key && sock?.sendMessage) {
+      try {
+        await sock.sendMessage(msg.chat, { text, edit: response.key })
+        return
+      } catch {}
+    }
+    if (response?.edit) {
+      try {
+        await response.edit(text)
+        return
+      } catch {}
+    }
+    await msg.reply(text)
+  } catch (error) {
+    console.error('[ping] error:', error?.stack || error)
+    await msg.reply('❎ No pude medir el tiempo de respuesta de WhatsApp.')
+  }
+}
+
 export default {
-  command: 'host',
+  command: ['host', 'p'],
   category: 'general',
-  description: 'Muestra el diagnóstico del host con métricas del sistema.',
-  run: sendHost,
+  description: 'host muestra el diagnóstico del servidor; p mide la respuesta de WhatsApp.',
+  run: async context => context.command === 'p' ? sendPing(context) : sendHost(context),
 }

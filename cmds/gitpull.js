@@ -47,7 +47,8 @@ export default {
     pullState.running = true
     let progress = null
     try {
-      try { progress = await msg.reply('⏳ Revisando el repositorio y buscando actualizaciones…') } catch {}
+      const heading = '⚙️ ⟨ 𝗥𝗲𝗺 - 𝗨𝗣𝗗𝗔𝗧𝗘 ⟩'
+      try { progress = await msg.reply(`${heading}\n_⏳ Verificando actualizaciones en el repositorio..._`) } catch {}
 
       const { stdout: status } = await runGit(['status', '--porcelain', '--untracked-files=no'])
       if (status.trim()) {
@@ -58,11 +59,10 @@ export default {
 
       const { stdout, stderr } = await runGit(['pull', '--ff-only'])
       const output = safeOutput([stdout, stderr].filter(Boolean).join('\n'))
-      const text = [
-        '✅ `git pull --ff-only` terminó correctamente.',
-        output || 'No había cambios nuevos.',
-        'El comando no reinicia el bot ni instala dependencias; reinícialo manualmente si la actualización lo requiere.',
-      ].join('\n\n')
+      const upToDate = !output || /already up.to.date|up.to.date/i.test(output)
+      const text = upToDate
+        ? `${heading}\n✅ 𝗘𝗹 𝗯𝗼𝘁 𝘆𝗮 𝗲𝘀𝘁á 𝗮𝗰𝘁𝘂𝗮𝗹𝗶𝘇𝗮𝗱𝗼.\n_No hay cambios pendientes._`
+        : `${heading}\n✅ 𝗔𝗰𝘁𝘂𝗮𝗹𝗶𝘇𝗮𝗰𝗶ó𝗻 𝗲𝘅𝗶𝘁𝗼𝘀𝗮.${output.split('\n').map(line => `\n> \`${line.replace(/`/g, "'")}\``).join('')}`
       await finishReply(context, progress, text)
     } catch (error) {
       const detail = safeOutput(error?.stderr || error?.stdout || error?.message)

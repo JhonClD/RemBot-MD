@@ -22,8 +22,8 @@ function formatUptime(seconds) {
   return parts.join(' ')
 }
 
-function bar(percent) {
-  const filled = Math.max(0, Math.min(BAR_LENGTH, Math.round(percent / 100 * BAR_LENGTH)))
+function bar(value) {
+  const filled = Math.max(0, Math.min(BAR_LENGTH, Math.round(value / 100 * BAR_LENGTH)))
   return `${'▰'.repeat(filled)}${'▱'.repeat(BAR_LENGTH - filled)}`
 }
 
@@ -78,7 +78,47 @@ async function diskStats() {
   const { bavail, bsize, blocks } = await fs.statfs(REPO_ROOT)
   const total = Number(blocks) * Number(bsize)
   const free = Number(bavail) * Number(bsize)
-  return { total, free, percent: percent(total - free, total) }
+  const used = Math.max(0, total - free)
+  return { total, used, free, percent: percent(used, total) }
+}
+
+async function addTreeSize(root, includeFile, result, maxDepth = 6) {
+  const pending = [{ dir: root, depth: 0 }]
+  while (pending.length && result.files < 5000) {
+    const { dir, depth } = pending.pop()
+    let entries
+    try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      if (result.files >= 5000) break
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (depth < maxDepth) pending.push({ dir: fullPath, depth: depth + 1 })
+        continue
+      }
+      if (!entry.isFile() || !includeFile(fullPath)) continue
+      try {
+        const stat = await fs.stat(fullPath)
+        result.bytes += stat.size
+        result.files++
+      } catch {}
+    }
+  }
+}
+
+async function tempStats() {
+  const result = { bytes: 0, files: 0 }
+  const tempRoot = os.tmpdir()
+  try {
+    const entries = await fs.readdir(tempRoot, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith('rembot-dw4-')) {
+        await addTreeSize(path.join(tempRoot, entry.name), () => true, result)
+      }
+    }
+  } catch {}
+  const exifTempRoot = path.join(REPO_ROOT, 'lib', 'system', path.basename(tempRoot))
+  await addTreeSize(exifTempRoot, filePath => ['.jpg', '.webp'].includes(path.extname(filePath).toLowerCase()), result)
+  return result
 }
 
 async function baileysVersion() {
@@ -96,8 +136,8 @@ async function baileysVersion() {
 async function sendHost({ msg, sock }) {
   const started = performance.now()
   try {
-    const [cpu, memory, disk, baileys, image] = await Promise.all([
-      cpuPercent(), memoryStats(), diskStats(), baileysVersion(), fs.readFile(IMAGE_PATH),
+    const [cpu, memory, disk, temp, baileys, image] = await Promise.all([
+      cpuPercent(), memoryStats(), diskStats(), tempStats(), baileysVersion(), fs.readFile(IMAGE_PATH),
     ])
     const ping = Math.round(performance.now() - started)
     const cpuBar = bar(cpu)
@@ -107,7 +147,10 @@ async function sendHost({ msg, sock }) {
     const pluginsCount = Object.keys(global.plugins || {}).length
     const ramTotal = gb(memory.total)
     const ramUsed = gb(memory.used)
+    const diskUsed = gb(disk.used)
+    const diskTotal = gb(disk.total)
     const diskFree = gb(disk.free)
+    const tempMb = (temp.bytes / 1024 ** 2).toFixed(1)
     const botRam = (process.memoryUsage().rss / 1024 ** 2).toFixed(0)
     const uptime = formatUptime(process.uptime())
     const statusMessage = `*💙 𝗥𝗘𝗠 𝗛𝗢𝗦𝗧 · 𝗗𝗶𝗮𝗴𝗻ó𝘀𝘁𝗶𝗰𝗼 🧸*
@@ -115,21 +158,19 @@ async function sendHost({ msg, sock }) {
 🔮 *𝗘𝗦𝗧𝗔𝗗𝗢*
 📡 ᴄᴏɴᴇxɪóɴ  · *Estable* 🩵
 ⚡ ᴘɪɴɢ      · *${ping} ms* 🟡
-🗄️ ᴅʙ        · *N/D* ⚪
 ⏳ ᴀᴄᴛɪᴠᴏ    · *${uptime}*
 
 ☕ *𝗥𝗘𝗖𝗨𝗥𝗦𝗢𝗦*
 ⚙️ ᴄᴘᴜ   · ${cpuBar} *${cpu}%*
 🧊 ʀᴀᴍ   · ${ramBar} *${ramPercent}%* (${ramUsed}/${ramTotal} GB)
-💾 ᴅɪsᴄᴏ · ${diskBar} *${disk.percent}%* (${diskFree} GB libres)
-🗑️ ᴛᴇᴍᴘ  · *N/D*
+💾 ᴅɪsᴄᴏ · ${diskBar} *${disk.percent}%* (${diskUsed}/${diskTotal} GB usados; ${diskFree} GB libres)
+🗑️ ᴛᴇᴍᴘ  · *${tempMb} MB* (${temp.files} archivos temporales del bot)
 🪄 ʀᴇᴍ   · *${botRam} MB*
 
 🔮 *𝗦𝗜𝗦𝗧𝗘𝗠𝗔*
 🔌 ᴘʟᴜɢɪɴs   · *${pluginsCount}*
 ⚙️ ᴍᴏᴅᴏ      · *Público*
 📦 ᴄᴏʀᴇ      · *Baileys v${baileys}*
-🛠️ ᴛᴏᴏʟs     · *N/D* ✨
 ━━━━━━━━━━━━━━━━━━━━
 _💙 ʀᴇᴍ ᴇsᴛá ʟɪsᴛᴀ ᴘᴀʀᴀ sᴇʀᴠɪʀᴛᴇ._`
 

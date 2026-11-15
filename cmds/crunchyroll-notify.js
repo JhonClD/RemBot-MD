@@ -6,6 +6,7 @@ const TMP_DIR = path.resolve('lib/system/tmp/cr-notify')
 const DB_PATH = path.join(TMP_DIR, 'crunchyroll-seen.json')
 const TRACKS_PATH = path.join(TMP_DIR, 'crunchyroll-tracks.json')
 const CFG_PATH = path.join(TMP_DIR, 'crunchyroll-cfg.json')
+const ANILIST_CACHE_PATH = path.join(TMP_DIR, 'anilist-titles.json')
 const MAX_SEEN = 500
 
 const CR_BASE = 'https://www.crunchyroll.com'
@@ -26,6 +27,11 @@ const ENV_USER_AGENT = (process.env.CR_USER_AGENT || NX_UA).trim().replace(/[\u0
 const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
 const SEND_DELAY_MS = envNum('CR_SEND_DELAY_MS', 1000)
 const BROWSE_TIMEOUT_MS = envNum('CR_BROWSE_TIMEOUT_MS', 20000, 1000)
+const ANILIST_TIMEOUT_MS = envNum('CR_ANILIST_TIMEOUT_MS', 4000, 1)
+const ANILIST_CACHE_TTL_MS = 30 * 24 * 60 * 60_000
+const ANILIST_NO_MATCH_TTL_MS = 6 * 60 * 60_000
+const ANILIST_ERROR_TTL_MS = 2 * 60_000
+const ANILIST_CACHE_MAX_ENTRIES = 1000
 const HEALTH_INTERVAL_MS = 30 * 60_000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
@@ -34,7 +40,7 @@ const CR_PREFIX = (process.env.BOT_PREFIX || '`').trim().split(/\s+/)[0] || '`'
 
 fs.mkdirSync(TMP_DIR, { recursive: true })
 try { fs.chmodSync(TMP_DIR, 0o700) } catch {}
-for (const file of [DB_PATH, TRACKS_PATH, CFG_PATH]) {
+for (const file of [DB_PATH, TRACKS_PATH, CFG_PATH, ANILIST_CACHE_PATH]) {
   if (fs.existsSync(file)) {
     try { fs.chmodSync(file, 0o600) } catch {}
   }
@@ -42,6 +48,7 @@ for (const file of [DB_PATH, TRACKS_PATH, CFG_PATH]) {
 
 const runtime = globalThis.__rembotCrunchyrollNotify ??= {
   cronTimer: null,
+  cronGen: 0,
   healthTimer: null,
   cronRunning: false,
   storedSock: null,
@@ -110,6 +117,21 @@ function loadJson(file, fallback) {
     return fallback
   }
 }
+
+const rawAnilistDiskCache = loadJson(ANILIST_CACHE_PATH, {})
+const rawAnilistDiskEntries = rawAnilistDiskCache && typeof rawAnilistDiskCache === 'object' && !Array.isArray(rawAnilistDiskCache)
+  ? Object.entries(rawAnilistDiskCache)
+  : []
+const anilistCacheNow = Date.now()
+const anilistDiskCache = Object.fromEntries(rawAnilistDiskEntries
+  .filter(([, entry]) => entry && typeof entry.title === 'string' && Number.isFinite(entry.savedAt) && entry.savedAt <= anilistCacheNow && anilistCacheNow - entry.savedAt < ANILIST_CACHE_TTL_MS)
+  .sort((a, b) => a[1].savedAt - b[1].savedAt)
+  .slice(-ANILIST_CACHE_MAX_ENTRIES))
+if (Object.keys(anilistDiskCache).length !== rawAnilistDiskEntries.length) {
+  try { atomicWrite(ANILIST_CACHE_PATH, anilistDiskCache) } catch {}
+}
+const anilistMemoryCache = new Map()
+const anilistInFlight = new Map()
 
 function loadCfg() {
   const cfg = loadJson(CFG_PATH, {})
@@ -579,7 +601,7 @@ function normalizeEpisode(item) {
 
 async function fetchBrowseEpisodes() {
   const pageSize = 100
-  const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 4, 1)))
+  const pageCount = Math.max(1, Math.floor(envNum('CR_PAGES', 2, 1)))
   const extraAudio = String(process.env.CR_EXTRA_AUDIO ?? 'zh-CN,ko-KR').split(',').map((x) => x.trim()).filter(Boolean)
   const allowed = new Set(['ja-JP', 'es-419', 'es-ES', ...extraAudio.map(normalizeLocale)].filter((locale) => !IGNORED_LOCALES.has(locale)))
   const seen = new Set(loadSeen())
@@ -737,35 +759,122 @@ function caption(episode, notification = null) {
   return `${updateLine}📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
 }
 
-const ANILIST_TITLE_MODE = process.env.CR_ANILIST_TITLE === 'native' ? 'native' : 'romaji'
-const anilistCache = new Map()
+const configuredAnilistMode = String(process.env.CR_ANILIST_TITLE || 'romaji').trim().toLowerCase()
+const ANILIST_TITLE_MODE = ['romaji', 'english', 'native'].includes(configuredAnilistMode) ? configuredAnilistMode : 'romaji'
+
+function parseTitle(value) {
+  const withoutParentheses = String(value || '').replace(/\([^)]*\)/gu, ' ')
+  const seasonMatch = withoutParentheses.match(/\bseason\s*(\d+)\b|\b(\d+)(?:st|nd|rd|th)\s+season\b|\btemporada\s*(\d+)\b|\bs\s*(\d+)\b/i)
+  const season = seasonMatch ? Number(seasonMatch.slice(1).find(Boolean)) : null
+  const withoutSeason = seasonMatch ? withoutParentheses.replace(seasonMatch[0], ' ') : withoutParentheses
+  const normalized = withoutSeason.normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\b(?:dub|dubbed)\s*$/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return { normalized, tokens: normalized ? normalized.split(' ') : [], season }
+}
+
+function diceSimilarity(leftTokens, rightTokens) {
+  const left = new Set(leftTokens)
+  const right = new Set(rightTokens)
+  if (!left.size || !right.size) return 0
+  let overlap = 0
+  for (const token of left) if (right.has(token)) overlap++
+  return (2 * overlap) / (left.size + right.size)
+}
+
+function scoreAnilistCandidate(source, media) {
+  const title = media?.title || {}
+  const aliases = [title.romaji, title.english, title.native, ...(Array.isArray(media?.synonyms) ? media.synonyms : [])]
+    .filter((candidate) => typeof candidate === 'string' && candidate.trim())
+    .map(parseTitle)
+  const similarity = Math.max(0, ...aliases.map((alias) => diceSimilarity(source.tokens, alias.tokens)))
+  const candidateSeason = aliases.find((alias) => alias.season !== null)?.season ?? null
+  let score = similarity
+  if (source.season !== null && source.season >= 2) {
+    if (candidateSeason === source.season) score += 0.2
+    else if (candidateSeason !== null) score -= 0.4
+    else score -= 0.5
+  } else if (source.season === 1 && candidateSeason !== null && candidateSeason >= 2) {
+    score -= 0.3
+  }
+  return { media, similarity, score }
+}
+
+function rememberAnilistMemory(key, value, ttlMs) {
+  anilistMemoryCache.set(key, { value, expiresAt: Date.now() + ttlMs })
+  if (anilistMemoryCache.size > ANILIST_CACHE_MAX_ENTRIES) {
+    anilistMemoryCache.delete(anilistMemoryCache.keys().next().value)
+  }
+}
+
+function saveAnilistDiskTitle(key, title) {
+  anilistDiskCache[key] = { title, savedAt: Date.now() }
+  const bounded = Object.fromEntries(Object.entries(anilistDiskCache)
+    .sort((a, b) => a[1].savedAt - b[1].savedAt)
+    .slice(-ANILIST_CACHE_MAX_ENTRIES))
+  for (const cachedKey of Object.keys(anilistDiskCache)) delete anilistDiskCache[cachedKey]
+  Object.assign(anilistDiskCache, bounded)
+  try { atomicWrite(ANILIST_CACHE_PATH, anilistDiskCache) } catch (error) {
+    console.warn(`[CR-Notify] No se pudo guardar caché AniList: ${error.message}`)
+  }
+}
 
 async function anilistTitle(name) {
-  const clean = String(name || '').replace(/\s*\([^)]*\)/g, '').trim()
-  if (!clean) return name
-  const key = clean.toLowerCase()
-  if (anilistCache.has(key)) return anilistCache.get(key) || name
-  let result = null
-  try {
+  const source = parseTitle(name)
+  if (!source.normalized) return name
+  const key = `${ANILIST_TITLE_MODE}|${source.normalized}|s${source.season ?? 'x'}`
+  const now = Date.now()
+  const memory = anilistMemoryCache.get(key)
+  if (memory && memory.expiresAt > now) return memory.value || name
+  if (memory) anilistMemoryCache.delete(key)
+
+  const disk = anilistDiskCache[key]
+  if (disk?.title && Number.isFinite(disk.savedAt) && now - disk.savedAt < ANILIST_CACHE_TTL_MS) {
+    rememberAnilistMemory(key, disk.title, ANILIST_CACHE_TTL_MS - (now - disk.savedAt))
+    return disk.title
+  }
+  if (disk) delete anilistDiskCache[key]
+  if (anilistInFlight.has(key)) return anilistInFlight.get(key)
+
+  const task = (async () => {
     const response = await fetch('https://graphql.anilist.co', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({
-        query: 'query ($search: String) { Media(search: $search, type: ANIME, sort: SEARCH_MATCH) { title { romaji native } } }',
-        variables: { search: clean },
+        query: 'query ($search: String) { Page(perPage: 10) { media(search: $search, type: ANIME, isAdult: false, format_not_in: [MUSIC], sort: SEARCH_MATCH) { title { romaji english native } synonyms } } }',
+        variables: { search: source.normalized },
       }),
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(ANILIST_TIMEOUT_MS),
     })
-    if (response.ok) {
-      const data = await response.json()
-      const title = data?.data?.Media?.title
-      result = (ANILIST_TITLE_MODE === 'native' ? title?.native || title?.romaji : title?.romaji || title?.native) || null
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const data = await response.json()
+    if (Array.isArray(data?.errors) && data.errors.length) throw new Error(data.errors[0]?.message || 'error GraphQL')
+    const candidates = data?.data?.Page?.media || []
+    const ranked = candidates.map((media) => scoreAnilistCandidate(source, media))
+      .filter((candidate) => candidate.similarity >= 0.5 && candidate.score >= 0.6)
+      .sort((a, b) => b.score - a.score || b.similarity - a.similarity)
+    const best = ranked[0]?.media
+    const title = best?.title?.[ANILIST_TITLE_MODE] || best?.title?.romaji || best?.title?.english || best?.title?.native || null
+    if (!title) {
+      rememberAnilistMemory(key, null, ANILIST_NO_MATCH_TTL_MS)
+      return name
     }
-  } catch (error) {
-    console.warn(`[CR-Notify] AniList falló para "${clean}": ${error.message}`)
-  }
-  if (result) anilistCache.set(key, result)
-  return result || name
+    rememberAnilistMemory(key, title, ANILIST_CACHE_TTL_MS)
+    saveAnilistDiskTitle(key, title)
+    return title
+  })().catch((error) => {
+    console.warn(`[CR-Notify] AniList falló para "${name}": ${error.message}`)
+    rememberAnilistMemory(key, null, ANILIST_ERROR_TTL_MS)
+    return name
+  }).finally(() => {
+    anilistInFlight.delete(key)
+  })
+  anilistInFlight.set(key, task)
+  return task
 }
 
 async function sendEpisode(sock, jid, episode, quoted = null, notification = null) {
@@ -792,26 +901,57 @@ function getSock(fallback) {
   return runtime.storedSock || fallback || global.sock || null
 }
 
+function getCronIntervalMs(cfg) {
+  const configuredMs = Number(cfg.intervalMs)
+  if (Number.isFinite(configuredMs) && configuredMs >= 1_000) return Math.min(configuredMs, 60 * 60_000)
+  const minutesRaw = cfg.minutes ?? process.env.CR_MINUTES
+  if (minutesRaw === undefined || minutesRaw === '') return 60_000
+  const minutes = Math.min(60, Math.max(1, Math.floor(Number(minutesRaw) || 1)))
+  return minutes * 60_000
+}
+
+function formatCronInterval(intervalMs) {
+  return intervalMs % 60_000 === 0
+    ? `${intervalMs / 60_000} min`
+    : `${Math.round(intervalMs / 1000)} s`
+}
+
 function stopCron() {
-  if (runtime.cronTimer) clearInterval(runtime.cronTimer)
+  runtime.cronGen = (runtime.cronGen || 0) + 1
+  if (runtime.cronTimer) clearTimeout(runtime.cronTimer)
   runtime.cronTimer = null
 }
 
 function startCron(sock) {
   if (sock) runtime.storedSock = sock
   stopCron()
+  const gen = runtime.cronGen
   const cfg = loadCfg()
   if (cfg.cronDisabled) {
     console.log('[CR-Notify] Monitoreo detenido por configuración. Usa `crstart para reanudarlo.')
     return
   }
-  const minutesRaw = cfg.minutes || process.env.CR_MINUTES || 1
-  const minutes = Math.max(1, Math.floor(Number(minutesRaw) || 1))
-  runtime.cronTimer = setInterval(() => checkAndSend(getSock(), false).catch((error) => console.error('[CR-Notify] Cron:', error.message)), minutes * 60_000)
-  runtime.cronTimer.unref?.()
-  setTimeout(() => checkAndSend(getSock(), false).catch((error) => console.error('[CR-Notify] Cron:', error.message)), 10_000).unref?.()
-  console.log(`[CR-Notify] Cron activo → cada ${minutes} min | ${(cfg.targetJids || []).length} grupo(s) configurado(s)`)
-  console.log(`[CR-Notify] Auto-inicio | Grupos: ${(cfg.targetJids || []).length} | Modo: ${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'} | Cron: ON`)
+  const intervalMs = getCronIntervalMs(cfg)
+  const intervalLabel = formatCronInterval(intervalMs)
+  const schedule = (waitMs) => {
+    if (gen !== runtime.cronGen) return
+    const timer = setTimeout(async () => {
+      if (gen !== runtime.cronGen) return
+      const startedAt = Date.now()
+      try {
+        await checkAndSend(getSock(), false)
+      } catch (error) {
+        console.error('[CR-Notify] Cron:', error.message)
+      }
+      if (gen !== runtime.cronGen) return
+      schedule(Math.max(1_000, intervalMs - (Date.now() - startedAt)))
+    }, waitMs)
+    runtime.cronTimer = timer
+    timer.unref?.()
+  }
+  schedule(10_000)
+  console.log(`[CR-Notify] Cron activo → cada ${intervalLabel} | ${(cfg.targetJids || []).length} destino(s) configurado(s)`)
+  console.log(`[CR-Notify] Auto-inicio | Destinos: ${(cfg.targetJids || []).length} | Modo: ${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'} | Cron: ON`)
   console.log(`[CR-Notify] Delays → JID: ${SEND_JID_DELAY_MS}ms | Ep: ${SEND_DELAY_MS}ms | Browse: ${BROWSE_TIMEOUT_MS}ms`)
 }
 
@@ -819,10 +959,10 @@ async function checkAndSend(sock, manual = false) {
   if (runtime.cronRunning || !sock) return 0
   const jids = loadCfg().targetJids || []
   if (!jids.length) {
-    if (manual) console.log('[CR-Notify] Revisión manual omitida: no hay grupos configurados.')
+    if (manual) console.log('[CR-Notify] Revisión manual omitida: no hay destinos configurados.')
     return 0
   }
-  console.log(`[CR-Notify] Revisión ${manual ? 'manual' : 'programada'} iniciada | Grupos: ${jids.length}`)
+  console.log(`[CR-Notify] Revisión ${manual ? 'manual' : 'programada'} iniciada | Destinos: ${jids.length}`)
   runtime.cronRunning = true
   try {
     return await withLock(async () => {
@@ -848,7 +988,7 @@ async function checkAndSend(sock, manual = false) {
         }
         if (SEND_DELAY_MS) await delay(SEND_DELAY_MS)
       }
-      console.log(`[CR-Notify] ${sent}/${episodes.length} notificación(es) enviadas a ${jids.length} grupo(s).`)
+      console.log(`[CR-Notify] ${sent}/${episodes.length} notificación(es) enviadas a ${jids.length} destino(s).`)
       return sent
     })
   } finally {
@@ -866,6 +1006,40 @@ function canManageGroup(msg, sock, isOwner) {
       return ids.includes(sender) && ['admin', 'superadmin'].includes(participant.admin)
     })
   }).catch(() => false)
+}
+
+function isNewsletterJid(jid) {
+  return typeof jid === 'string' && /^[A-Za-z0-9._-]+@newsletter$/i.test(jid)
+}
+
+function parseNewsletterTarget(raw) {
+  const value = String(raw || '').trim()
+  if (isNewsletterJid(value)) return { type: 'jid', key: `${value.slice(0, value.lastIndexOf('@'))}@newsletter` }
+  if (/^\d+$/.test(value)) return { type: 'jid', key: `${value}@newsletter` }
+  let url
+  try {
+    url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`)
+  } catch {
+    return null
+  }
+  if (!['whatsapp.com', 'www.whatsapp.com', 'wa.me', 'www.wa.me'].includes(url.hostname.toLowerCase())) return null
+  const parts = url.pathname.split('/').filter(Boolean)
+  if (parts.length !== 2 || parts[0].toLowerCase() !== 'channel') return null
+  let invite
+  try { invite = decodeURIComponent(parts[1]) } catch { return null }
+  return /^[A-Za-z0-9_-]+$/.test(invite) ? { type: 'invite', key: invite } : null
+}
+
+async function resolveNewsletterTarget(sock, raw) {
+  const target = parseNewsletterTarget(raw)
+  if (!target) throw new Error('Usa un ID numérico, un JID @newsletter o un enlace whatsapp.com/channel/... o wa.me/channel/...')
+  if (typeof sock.newsletterMetadata !== 'function') {
+    throw new Error('Esta sesión de Baileys no ofrece newsletterMetadata; actualiza Baileys para registrar canales.')
+  }
+  const metadata = await sock.newsletterMetadata(target.type, target.key)
+  const jid = metadata?.id || (target.type === 'jid' ? target.key : '')
+  if (!isNewsletterJid(jid)) throw new Error('No pude resolver ese canal de WhatsApp.')
+  return { jid: `${jid.slice(0, jid.lastIndexOf('@'))}@newsletter`, name: String(metadata?.name || '').trim() }
 }
 
 function usage(command = 'crnotify') {
@@ -910,7 +1084,7 @@ async function runLogout({ msg, isOwner }) {
   saveCfg(cfg)
   runtime.token = null
   runtime.tokenExp = 0
-  await msg.reply(`🔒 Sesión cerrada. Se conservaron ${cfg.targetJids.length} grupo(s). El cron continuará en modo anónimo.`)
+  await msg.reply(`🔒 Sesión cerrada. Se conservaron ${cfg.targetJids.length} destino(s). El cron continuará en modo anónimo.`)
 }
 
 async function runSet({ msg, sock, isOwner }) {
@@ -920,7 +1094,7 @@ async function runSet({ msg, sock, isOwner }) {
   cfg.cronDisabled = false
   saveCfg(cfg)
   startCron(sock)
-  return msg.reply(`✅ Grupo añadido al notificador. Total: ${cfg.targetJids.length}`)
+  return msg.reply(`✅ Grupo añadido al notificador. Total de destinos: ${cfg.targetJids.length}`)
 }
 
 async function runRemove({ msg, sock, isOwner }) {
@@ -932,24 +1106,85 @@ async function runRemove({ msg, sock, isOwner }) {
   return msg.reply(before === cfg.targetJids.length ? '⚠️ Este grupo no estaba configurado.' : `🗑️ Grupo eliminado. Quedan: ${cfg.targetJids.length}`)
 }
 
+async function runChannelAdd({ msg, sock, args, isOwner }) {
+  if (!isOwner) return msg.reply('⛔ Solo el dueño puede añadir canales.')
+  const inputs = (args || []).flatMap((value) => String(value).split(',').map((item) => item.trim()).filter(Boolean))
+  if (!inputs.length) return msg.reply(`Uso: ${CR_PREFIX}crchanadd <ID, JID @newsletter o enlace de canal> [...]`)
+
+  const cfg = loadCfg()
+  const results = []
+  let changed = false
+  for (const input of inputs) {
+    try {
+      const { jid, name } = await resolveNewsletterTarget(sock, input)
+      if (cfg.targetJids.includes(jid)) {
+        results.push(`ℹ️ ${name || jid}: ya estaba configurado.`)
+        continue
+      }
+      cfg.targetJids.push(jid)
+      changed = true
+      results.push(`✅ ${name ? `${name} — ` : ''}${jid} añadido.`)
+    } catch (error) {
+      results.push(`❌ ${input}: ${error.message}`)
+    }
+  }
+  if (changed) {
+    cfg.cronDisabled = false
+    saveCfg(cfg)
+    startCron(sock)
+  }
+  return msg.reply(`📢 Canales procesados:\n${results.join('\n')}\n\nLa cuenta de WhatsApp conectada debe ser administradora del canal para publicar.`)
+}
+
+async function runChannelRemove({ msg, sock, args, isOwner }) {
+  if (!isOwner) return msg.reply('⛔ Solo el dueño puede quitar canales.')
+  const inputs = (args || []).flatMap((value) => String(value).split(',').map((item) => item.trim()).filter(Boolean))
+  if (!inputs.length) return msg.reply(`Uso: ${CR_PREFIX}crchanrem <ID, JID @newsletter o enlace de canal> [...]`)
+
+  const cfg = loadCfg()
+  const results = []
+  let changed = false
+  for (const input of inputs) {
+    try {
+      const target = parseNewsletterTarget(input)
+      if (!target) throw new Error('Usa un ID numérico, un JID @newsletter o un enlace whatsapp.com/channel/... o wa.me/channel/...')
+      const { jid } = target.type === 'jid' ? { jid: target.key } : await resolveNewsletterTarget(sock, input)
+      const before = cfg.targetJids.length
+      cfg.targetJids = cfg.targetJids.filter((configured) => configured !== jid)
+      if (cfg.targetJids.length === before) {
+        results.push(`ℹ️ ${jid}: no estaba configurado.`)
+      } else {
+        changed = true
+        results.push(`🗑️ ${jid}: eliminado.`)
+      }
+    } catch (error) {
+      results.push(`❌ ${input}: ${error.message}`)
+    }
+  }
+  if (changed) saveCfg(cfg)
+  return msg.reply(`📢 Canales procesados:\n${results.join('\n')}`)
+}
+
 async function runStatus({ msg }) {
   const cfg = loadCfg()
   const seen = loadSeen()
   const trackedLanguages = Object.keys(loadTrackState()).length
-  const minutes = Math.max(1, Math.floor(Number(cfg.minutes || process.env.CR_MINUTES || 1) || 1))
+  const intervalLabel = formatCronInterval(getCronIntervalMs(cfg))
   const exp = cfg.tokenExp ? new Date(cfg.tokenExp).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' }) : '—'
-  const groups = cfg.targetJids.length ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${jid}`).join('\n') : `  Ninguno — usa ${CR_PREFIX}crset`
+  const destinations = cfg.targetJids.length
+    ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${isNewsletterJid(jid) ? 'Canal' : 'Grupo'} — ${jid}`).join('\n')
+    : `  Ninguno — usa ${CR_PREFIX}crset o ${CR_PREFIX}crchanadd`
   return msg.reply(
     `📊 *CR-Notify Status*\n\n` +
     `🔑 Modo: *${cfg.loggedIn ? (cfg.authMode === 'web' ? 'Cuenta real (etp_rt)' : 'Cuenta real') : 'Anónimo'}*\n` +
     `⏳ Token expira: *${exp}*\n` +
     `🔁 Refresh token: *${cfg.refreshToken ? 'Sí' : 'No'}*\n` +
-    `⏱️ Cron: cada *${minutes} min*\n` +
+    `⏱️ Cron: cada *${intervalLabel}*\n` +
     `🔄 Cron activo: *${runtime.cronTimer ? 'Sí' : (cfg.cronDisabled ? 'Detenido' : 'No')}*\n` +
     `💾 Episodios registrados: *${seen.length}*\n` +
     `🈯 Episodios con idiomas registrados: *${trackedLanguages}*\n` +
     `🔐 Credenciales: *${runtime.credentialCache.source}*\n\n` +
-    `🎯 *Grupos configurados (${cfg.targetJids.length}):*\n${groups}`
+    `🎯 *Destinos configurados (${cfg.targetJids.length}):*\n${destinations}`
   )
 }
 
@@ -1017,18 +1252,42 @@ async function runStart({ msg, sock, isOwner }) {
 async function runInterval({ msg, sock, args, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño puede cambiar el intervalo global.')
   const raw = args[0]
-  if (raw === undefined) return msg.reply(`Uso: ${CR_PREFIX}crinterval [1-1440] minutos`)
-  const minutes = Number(raw)
-  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
-    return msg.reply('⛔ Intervalo no válido. Usa un número entero de 1 a 1440 minutos.')
+  if (raw === undefined) return msg.reply(`Uso: ${CR_PREFIX}crinterval <segundos>s (1s-60s) | <minutos>m (1m-60m)`)
+  const value = String(raw).trim().toLowerCase()
+  const intervalMatch = value.match(/^(\d+)(s|m)?$/)
+  if (!intervalMatch) {
+    return msg.reply('⛔ Intervalo no válido. Usa 1s-60s o 1m-60m; también se acepta un número sin sufijo como minutos.')
+  }
+  const amount = Number(intervalMatch[1])
+  const unit = intervalMatch[2]
+  let intervalMs
+  let minutes
+  if (unit === 's') {
+    if (amount < 1 || amount > 60) {
+      return msg.reply('⛔ Intervalo no válido. Usa entre 1s y 60s.')
+    }
+    intervalMs = amount * 1000
+  } else {
+    minutes = amount
+    if (minutes < 1 || minutes > 60) {
+      return msg.reply('⛔ Intervalo no válido. Usa entre 1m y 60m; también puedes indicar solo el número de minutos.')
+    }
+    intervalMs = minutes * 60_000
   }
   const cfg = loadCfg()
-  cfg.minutes = minutes
+  if (unit === 's') {
+    cfg.intervalMs = intervalMs
+    delete cfg.minutes
+  } else {
+    cfg.minutes = minutes
+    delete cfg.intervalMs
+  }
   saveCfg(cfg)
+  const intervalLabel = formatCronInterval(intervalMs)
   if (!cfg.cronDisabled) startCron(sock)
   return msg.reply(cfg.cronDisabled
-    ? `✅ Intervalo guardado: cada ${minutes} min. El cron sigue detenido; usa ${CR_PREFIX}crstart para iniciarlo.`
-    : `✅ Intervalo actualizado: cada ${minutes} min.`)
+    ? `✅ Intervalo guardado: cada ${intervalLabel}. El cron sigue detenido; usa ${CR_PREFIX}crstart para iniciarlo.`
+    : `✅ Intervalo actualizado: cada ${intervalLabel}.`)
 }
 
 async function runDiag({ msg, isOwner }) {
@@ -1066,6 +1325,8 @@ async function runCommand({ msg, sock, command, args, isOwner }) {
   if (command === 'crlogout') return runLogout({ msg, isOwner })
   if (command === 'crset') return runSet({ msg, sock, isOwner })
   if (command === 'crrem') return runRemove({ msg, sock, isOwner })
+  if (command === 'crchanadd') return runChannelAdd({ msg, sock, args, isOwner })
+  if (command === 'crchanrem') return runChannelRemove({ msg, sock, args, isOwner })
   if (command === 'crstatus') return runStatus({ msg })
   if (command === 'crlist') return runList({ msg, sock, args, isOwner })
   if (command === 'crnotify') return runNotify({ msg, sock, args, isOwner })
@@ -1076,9 +1337,9 @@ async function runCommand({ msg, sock, command, args, isOwner }) {
 }
 
 export default {
-  command: ['crlogin', 'crlogout', 'crset', 'crrem', 'crstatus', 'crlist', 'crnotify', 'crstop', 'crstart', 'crinterval', 'crdiag'],
+  command: ['crlogin', 'crlogout', 'crset', 'crrem', 'crchanadd', 'crchanrem', 'crstatus', 'crlist', 'crnotify', 'crstop', 'crstart', 'crinterval', 'crdiag'],
   category: 'anime',
-  description: 'Notificador de estrenos de Crunchyroll mediante la API.',
+  description: 'Notificador de estrenos de Crunchyroll en grupos y canales de WhatsApp.',
   run: runCommand,
 }
 

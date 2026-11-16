@@ -527,6 +527,11 @@ const LOCALE_LABELS = {
   chinese: 'zh-CN', chino: 'zh-CN', 'simplified chinese': 'zh-CN', 'traditional chinese': 'zh-TW',
 }
 const IGNORED_LOCALES = new Set(['zh-TW'])
+const TRACKED_SUBTITLE_LOCALES = new Set(['es-419', 'es-ES'])
+
+function isTrackedSubtitleLocale(locale) {
+  return TRACKED_SUBTITLE_LOCALES.has(locale) || locale.startsWith('en-')
+}
 
 function localeKey(value) {
   return String(value).trim().replace(/_/g, '-').replace(/[()]/g, '').replace(/\s+/g, ' ').toLowerCase()
@@ -592,7 +597,9 @@ function normalizeEpisode(item) {
     epTitle: item?.title || '',
     epNum,
     audioLocale: locale,
-    subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])].map(normalizeLocale).filter((locale) => locale && !IGNORED_LOCALES.has(locale)))],
+    subLocales: [...new Set([...(Array.isArray(item?.subtitle_locales) ? item.subtitle_locales : []), ...(Array.isArray(meta.subtitle_locales) ? meta.subtitle_locales : [])]
+      .map(normalizeLocale)
+      .filter((locale) => locale && !IGNORED_LOCALES.has(locale) && isTrackedSubtitleLocale(locale)))],
     image: extractImage(item?.images),
     airTime: Date.parse(meta.episode_air_date || item?.episode_air_date || item?.premium_available_date || item?.availability_starts || '') || 0,
     link: `https://www.crunchyroll.com/watch/${id}${slug ? `/${slug}` : ''}`,
@@ -738,10 +745,11 @@ const LOCALES = { 'ja-JP': 'Japonés', 'zh-CN': 'Chino', 'zh-TW': 'Chino (Taiwá
 function subtitleLine(episode) {
   if (['es-419', 'es-ES'].includes(episode.audioLocale)) return ''
   const subs = new Set(episode.subLocales || [])
-  if (subs.has('es-419')) return '> 🇲🇽 Sub Español\n'
-  if (subs.has('es-ES')) return '> 🇪🇸 Sub Español Castellano\n'
-  if ([...subs].some((code) => code.startsWith('en-'))) return '> 🇺🇸 Sub English\n'
-  return ''
+  const lines = []
+  if (subs.has('es-419')) lines.push('> 🇲🇽 Sub Español')
+  if (subs.has('es-ES')) lines.push('> 🇪🇸 Sub Español Castellano')
+  if ([...subs].some((code) => code.startsWith('en-'))) lines.push('> 🇺🇸 Sub English')
+  return lines.length ? `${lines.join('\n')}\n` : ''
 }
 
 function formatLocale(locale) {

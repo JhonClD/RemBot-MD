@@ -6,7 +6,6 @@ const TMP_DIR = path.resolve('lib/system/tmp/cr-notify')
 const DB_PATH = path.join(TMP_DIR, 'crunchyroll-seen.json')
 const TRACKS_PATH = path.join(TMP_DIR, 'crunchyroll-tracks.json')
 const CFG_PATH = path.join(TMP_DIR, 'crunchyroll-cfg.json')
-const ANILIST_CACHE_PATH = path.join(TMP_DIR, 'anilist-titles.json')
 const MAX_SEEN = 500
 
 const CR_BASE = 'https://www.crunchyroll.com'
@@ -27,11 +26,6 @@ const ENV_USER_AGENT = (process.env.CR_USER_AGENT || NX_UA).trim().replace(/[\u0
 const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
 const SEND_DELAY_MS = envNum('CR_SEND_DELAY_MS', 1000)
 const BROWSE_TIMEOUT_MS = envNum('CR_BROWSE_TIMEOUT_MS', 20000, 1000)
-const ANILIST_TIMEOUT_MS = envNum('CR_ANILIST_TIMEOUT_MS', 4000, 1)
-const ANILIST_CACHE_TTL_MS = 30 * 24 * 60 * 60_000
-const ANILIST_NO_MATCH_TTL_MS = 6 * 60 * 60_000
-const ANILIST_ERROR_TTL_MS = 2 * 60_000
-const ANILIST_CACHE_MAX_ENTRIES = 1000
 const HEALTH_INTERVAL_MS = 30 * 60_000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
@@ -40,7 +34,7 @@ const CR_PREFIX = (process.env.BOT_PREFIX || '`').trim().split(/\s+/)[0] || '`'
 
 fs.mkdirSync(TMP_DIR, { recursive: true })
 try { fs.chmodSync(TMP_DIR, 0o700) } catch {}
-for (const file of [DB_PATH, TRACKS_PATH, CFG_PATH, ANILIST_CACHE_PATH]) {
+for (const file of [DB_PATH, TRACKS_PATH, CFG_PATH]) {
   if (fs.existsSync(file)) {
     try { fs.chmodSync(file, 0o600) } catch {}
   }
@@ -118,20 +112,6 @@ function loadJson(file, fallback) {
   }
 }
 
-const rawAnilistDiskCache = loadJson(ANILIST_CACHE_PATH, {})
-const rawAnilistDiskEntries = rawAnilistDiskCache && typeof rawAnilistDiskCache === 'object' && !Array.isArray(rawAnilistDiskCache)
-  ? Object.entries(rawAnilistDiskCache)
-  : []
-const anilistCacheNow = Date.now()
-const anilistDiskCache = Object.fromEntries(rawAnilistDiskEntries
-  .filter(([, entry]) => entry && typeof entry.title === 'string' && Number.isFinite(entry.savedAt) && entry.savedAt <= anilistCacheNow && anilistCacheNow - entry.savedAt < ANILIST_CACHE_TTL_MS)
-  .sort((a, b) => a[1].savedAt - b[1].savedAt)
-  .slice(-ANILIST_CACHE_MAX_ENTRIES))
-if (Object.keys(anilistDiskCache).length !== rawAnilistDiskEntries.length) {
-  try { atomicWrite(ANILIST_CACHE_PATH, anilistDiskCache) } catch {}
-}
-const anilistMemoryCache = new Map()
-const anilistInFlight = new Map()
 
 function loadCfg() {
   const cfg = loadJson(CFG_PATH, {})
@@ -680,6 +660,31 @@ async function fetchLatest() {
   return fetchBrowseEpisodes()
 }
 
+async function fetchJapaneseEpisode(id) {
+  if (!id) return null
+  try {
+    const response = await crFetch(`/content/v2/cms/episodes/${encodeURIComponent(id)}`, { locale: 'ja-JP' }, CR_BASE, BROWSE_TIMEOUT_MS)
+    return Array.isArray(response?.data) ? response.data[0] || null : null
+  } catch (error) {
+    console.warn(`[CR-Notify] No se pudo obtener el título japonés de ${id}: ${error.message}`)
+    return null
+  }
+}
+
+function mergeJapaneseEpisode(episode, localized) {
+  if (!localized || typeof localized !== 'object') return episode
+  const meta = localized.episode_metadata || {}
+  const season = localized.season_title || meta.season_title || ''
+  let series = localized.series_title || meta.series_title || episode.series
+  if (season && series && !series.includes(season) && !season.startsWith(series)) series += ` ${season}`
+  return {
+    ...episode,
+    series: series.trim(),
+    epTitle: localized.title || episode.epTitle,
+    epNum: localized.episode_number ?? meta.episode_number ?? episode.epNum,
+  }
+}
+
 async function fetchNew() {
   const current = await fetchLatest()
   if (!current.length) {
@@ -745,11 +750,10 @@ const LOCALES = { 'ja-JP': 'Japonés', 'zh-CN': 'Chino', 'zh-TW': 'Chino (Taiwá
 function subtitleLine(episode) {
   if (['es-419', 'es-ES'].includes(episode.audioLocale)) return ''
   const subs = new Set(episode.subLocales || [])
-  const lines = []
-  if (subs.has('es-419')) lines.push('> 🇲🇽 Sub Español')
-  if (subs.has('es-ES')) lines.push('> 🇪🇸 Sub Español Castellano')
-  if ([...subs].some((code) => code.startsWith('en-'))) lines.push('> 🇺🇸 Sub English')
-  return lines.length ? `${lines.join('\n')}\n` : ''
+  if (subs.has('es-419')) return '> 🇲🇽 Sub Español\n'
+  if (subs.has('es-ES')) return '> 🇪🇸 Sub Español Castellano\n'
+  if ([...subs].some((code) => code.startsWith('en-'))) return '> 🇺🇸 Sub English\n'
+  return ''
 }
 
 function formatLocale(locale) {
@@ -767,126 +771,9 @@ function caption(episode, notification = null) {
   return `${updateLine}📺 ${episode.series}\n🎬 ${title}\n${flag} ${language}\n${subtitleLine(episode)}\n${episode.link}`
 }
 
-const configuredAnilistMode = String(process.env.CR_ANILIST_TITLE || 'romaji').trim().toLowerCase()
-const ANILIST_TITLE_MODE = ['romaji', 'english', 'native'].includes(configuredAnilistMode) ? configuredAnilistMode : 'romaji'
-
-function parseTitle(value) {
-  const withoutParentheses = String(value || '').replace(/\([^)]*\)/gu, ' ')
-  const seasonMatch = withoutParentheses.match(/\bseason\s*(\d+)\b|\b(\d+)(?:st|nd|rd|th)\s+season\b|\btemporada\s*(\d+)\b|\bs\s*(\d+)\b/i)
-  const season = seasonMatch ? Number(seasonMatch.slice(1).find(Boolean)) : null
-  const withoutSeason = seasonMatch ? withoutParentheses.replace(seasonMatch[0], ' ') : withoutParentheses
-  const normalized = withoutSeason.normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .replace(/\b(?:dub|dubbed)\s*$/u, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  return { normalized, tokens: normalized ? normalized.split(' ') : [], season }
-}
-
-function diceSimilarity(leftTokens, rightTokens) {
-  const left = new Set(leftTokens)
-  const right = new Set(rightTokens)
-  if (!left.size || !right.size) return 0
-  let overlap = 0
-  for (const token of left) if (right.has(token)) overlap++
-  return (2 * overlap) / (left.size + right.size)
-}
-
-function scoreAnilistCandidate(source, media) {
-  const title = media?.title || {}
-  const aliases = [title.romaji, title.english, title.native, ...(Array.isArray(media?.synonyms) ? media.synonyms : [])]
-    .filter((candidate) => typeof candidate === 'string' && candidate.trim())
-    .map(parseTitle)
-  const similarity = Math.max(0, ...aliases.map((alias) => diceSimilarity(source.tokens, alias.tokens)))
-  const candidateSeason = aliases.find((alias) => alias.season !== null)?.season ?? null
-  let score = similarity
-  if (source.season !== null && source.season >= 2) {
-    if (candidateSeason === source.season) score += 0.2
-    else if (candidateSeason !== null) score -= 0.4
-    else score -= 0.5
-  } else if (source.season === 1 && candidateSeason !== null && candidateSeason >= 2) {
-    score -= 0.3
-  }
-  return { media, similarity, score }
-}
-
-function rememberAnilistMemory(key, value, ttlMs) {
-  anilistMemoryCache.set(key, { value, expiresAt: Date.now() + ttlMs })
-  if (anilistMemoryCache.size > ANILIST_CACHE_MAX_ENTRIES) {
-    anilistMemoryCache.delete(anilistMemoryCache.keys().next().value)
-  }
-}
-
-function saveAnilistDiskTitle(key, title) {
-  anilistDiskCache[key] = { title, savedAt: Date.now() }
-  const bounded = Object.fromEntries(Object.entries(anilistDiskCache)
-    .sort((a, b) => a[1].savedAt - b[1].savedAt)
-    .slice(-ANILIST_CACHE_MAX_ENTRIES))
-  for (const cachedKey of Object.keys(anilistDiskCache)) delete anilistDiskCache[cachedKey]
-  Object.assign(anilistDiskCache, bounded)
-  try { atomicWrite(ANILIST_CACHE_PATH, anilistDiskCache) } catch (error) {
-    console.warn(`[CR-Notify] No se pudo guardar caché AniList: ${error.message}`)
-  }
-}
-
-async function anilistTitle(name) {
-  const source = parseTitle(name)
-  if (!source.normalized) return name
-  const key = `${ANILIST_TITLE_MODE}|${source.normalized}|s${source.season ?? 'x'}`
-  const now = Date.now()
-  const memory = anilistMemoryCache.get(key)
-  if (memory && memory.expiresAt > now) return memory.value || name
-  if (memory) anilistMemoryCache.delete(key)
-
-  const disk = anilistDiskCache[key]
-  if (disk?.title && Number.isFinite(disk.savedAt) && now - disk.savedAt < ANILIST_CACHE_TTL_MS) {
-    rememberAnilistMemory(key, disk.title, ANILIST_CACHE_TTL_MS - (now - disk.savedAt))
-    return disk.title
-  }
-  if (disk) delete anilistDiskCache[key]
-  if (anilistInFlight.has(key)) return anilistInFlight.get(key)
-
-  const task = (async () => {
-    const response = await fetch('https://graphql.anilist.co', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        query: 'query ($search: String) { Page(perPage: 10) { media(search: $search, type: ANIME, isAdult: false, format_not_in: [MUSIC], sort: SEARCH_MATCH) { title { romaji english native } synonyms } } }',
-        variables: { search: source.normalized },
-      }),
-      signal: AbortSignal.timeout(ANILIST_TIMEOUT_MS),
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const data = await response.json()
-    if (Array.isArray(data?.errors) && data.errors.length) throw new Error(data.errors[0]?.message || 'error GraphQL')
-    const candidates = data?.data?.Page?.media || []
-    const ranked = candidates.map((media) => scoreAnilistCandidate(source, media))
-      .filter((candidate) => candidate.similarity >= 0.5 && candidate.score >= 0.6)
-      .sort((a, b) => b.score - a.score || b.similarity - a.similarity)
-    const best = ranked[0]?.media
-    const title = best?.title?.[ANILIST_TITLE_MODE] || best?.title?.romaji || best?.title?.english || best?.title?.native || null
-    if (!title) {
-      rememberAnilistMemory(key, null, ANILIST_NO_MATCH_TTL_MS)
-      return name
-    }
-    rememberAnilistMemory(key, title, ANILIST_CACHE_TTL_MS)
-    saveAnilistDiskTitle(key, title)
-    return title
-  })().catch((error) => {
-    console.warn(`[CR-Notify] AniList falló para "${name}": ${error.message}`)
-    rememberAnilistMemory(key, null, ANILIST_ERROR_TTL_MS)
-    return name
-  }).finally(() => {
-    anilistInFlight.delete(key)
-  })
-  anilistInFlight.set(key, task)
-  return task
-}
-
 async function sendEpisode(sock, jid, episode, quoted = null, notification = null) {
-  const text = caption({ ...episode, series: await anilistTitle(episode.series) }, notification)
+  const localized = await fetchJapaneseEpisode(episode.id)
+  const text = caption(mergeJapaneseEpisode(episode, localized), notification)
   const options = quoted ? { quoted } : {}
   if (episode.image) {
     try {

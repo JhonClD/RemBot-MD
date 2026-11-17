@@ -36,7 +36,7 @@ const ANILIST_CACHE_MAX_ENTRIES = 1000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
 const COOKIE_TTL_MS = 6 * 60 * 60_000
-const CR_PREFIX = botPrefix.resolvePrefix()[0] || '.'
+const CR_PREFIX = botPrefix.resolvePrefix()[0] || '`'
 
 fs.mkdirSync(TMP_DIR, { recursive: true })
 try { fs.chmodSync(TMP_DIR, 0o700) } catch {}

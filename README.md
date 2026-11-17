@@ -1,6 +1,6 @@
 # RemBot-MD
 
-Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculación a WhatsApp e incluye `/dw4` para comprimir videos a 360p y `/rss` para suscribirse a fuentes RSS.
+Bot mínimo de WhatsApp basado en Baileys. Conserva el arranque y la vinculación a WhatsApp e incluye `` `dw4 `` para comprimir videos a 360p y `` `rss `` para suscribirse a fuentes RSS.
 
 ## Requisitos
 
@@ -50,38 +50,38 @@ npm install
 npm start
 ```
 
-`/dw4` ejecuta el FFmpeg del sistema; no se descarga ni se incluye un binario FFmpeg en `package.json`. Si el ejecutable no se llama `ffmpeg` o no está en `PATH`, configura `FFMPEG_PATH` con la ruta al binario.
+`` `dw4 `` ejecuta el FFmpeg del sistema; no se descarga ni se incluye un binario FFmpeg en `package.json`. Si el ejecutable no se llama `ffmpeg` o no está en `PATH`, configura `FFMPEG_PATH` con la ruta al binario.
 
 Escanea el QR desde WhatsApp → **Dispositivos vinculados** → **Vincular un dispositivo**. La sesión local se guarda en `Sessions/Owner/`; no compartas ni publiques esa carpeta.
 
-## Usar `/dw4`
+## Usar `` `dw4 ``
 
 Responde al mensaje que contiene el video con:
 
 ```text
-/dw4
+`dw4
 ```
 
-El resultado se envía como video MP4 a 360p. Para recibirlo como documento, usa `/dw4 doc`.
+El resultado se envía como video MP4 a 360p. Para recibirlo como documento, usa `` `dw4 doc ``.
 
-## Usar `/rss`
+## Usar `` `rss ``
 
 El comando RSS permite administrar fuentes y recibir automáticamente sus novedades traducidas al español:
 
 ```text
-/rss https://ejemplo.com/feed.xml
-/rss list
-/rss ver [n]
-/rss del <n>
-/rss pause <n>
-/rss resume <n>
-/rss check
-/rss test [n]
+`rss https://ejemplo.com/feed.xml
+`rss list
+`rss ver [n]
+`rss del <n>
+`rss pause <n>
+`rss resume <n>
+`rss check
+`rss test [n]
 ```
 
 La configuración y los identificadores vistos se guardan localmente en `lib/system/tmp/rss-notify/feeds.json`, una ruta excluida por `.gitignore`. Agregar, eliminar, pausar, reanudar y probar feeds requiere ser owner o administrador del grupo.
 
-El prefijo predeterminado es `/`. Se puede cambiar con `BOT_PREFIX` en `.env`, si se desea.
+El prefijo predeterminado es la comilla invertida (`` ` ``). Se puede cambiar con `BOT_PREFIX` en `.env`, que también admite varios prefijos separados por coma o espacio (por ejemplo `BOT_PREFIX=.,/`). Toma como base el archivo `.env.example`.
 
 ## Progreso en terminal
 

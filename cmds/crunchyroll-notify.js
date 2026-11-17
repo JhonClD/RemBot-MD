@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { prefix as botPrefix } from '#utils'
 
 const TMP_DIR = path.resolve('lib/system/tmp/cr-notify')
 const DB_PATH = path.join(TMP_DIR, 'crunchyroll-seen.json')
@@ -35,7 +36,7 @@ const ANILIST_CACHE_MAX_ENTRIES = 1000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
 const COOKIE_TTL_MS = 6 * 60 * 60_000
-const CR_PREFIX = (process.env.BOT_PREFIX || '`').trim().split(/\s+/)[0] || '`'
+const CR_PREFIX = botPrefix.resolvePrefix()[0] || '.'
 
 fs.mkdirSync(TMP_DIR, { recursive: true })
 try { fs.chmodSync(TMP_DIR, 0o700) } catch {}
@@ -949,7 +950,7 @@ function startCron(sock) {
   const gen = runtime.cronGen
   const cfg = loadCfg()
   if (cfg.cronDisabled) {
-    console.log('[CR-Notify] Monitoreo detenido por configuración. Usa `crstart para reanudarlo.')
+    console.log(`[CR-Notify] Monitoreo detenido por configuración. Usa ${CR_PREFIX}crstart para reanudarlo.`)
     return
   }
   const intervalMs = getCronIntervalMs(cfg)
@@ -1372,7 +1373,7 @@ const autoStartTimer = setInterval(() => {
   if (sock || autoStartAttempts >= 30) {
     clearInterval(autoStartTimer)
     if (sock) startCron(sock)
-    else console.warn('[CR-Notify] WhatsApp todavía no está conectado; usa `crstart después de conectar.')
+    else console.warn(`[CR-Notify] WhatsApp todavía no está conectado; usa ${CR_PREFIX}crstart después de conectar.`)
   }
 }, 1000)
 autoStartTimer.unref?.()

@@ -33,8 +33,8 @@ const ENV_BASIC_ANON = (process.env.CR_BASIC_ANON || '').trim()
 const ENV_BASIC_AUTH = (process.env.CR_BASIC_AUTH || '').trim()
 const ENV_USER_AGENT = (process.env.CR_USER_AGENT || '').trim().replace(/[\u0000-\u001f\u007f]/g, '')
 
-const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 1500)
-const SEND_DELAY_MS = envNum('CR_SEND_DELAY_MS', 1000)
+const SEND_JID_DELAY_MS = envNum('CR_SEND_JID_DELAY_MS', 500)
+const SEND_DELAY_MS = envNum('CR_SEND_DELAY_MS', 300)
 const BROWSE_TIMEOUT_MS = envNum('CR_BROWSE_TIMEOUT_MS', 20000, 1000)
 const IMAGE_TIMEOUT_MS = envNum('CR_IMAGE_TIMEOUT_MS', 10000, 1000)
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024
@@ -46,6 +46,7 @@ const ANILIST_CACHE_MAX_ENTRIES = 1000
 const CREDENTIAL_CACHE_MS = 6 * 60 * 60_000
 const CREDENTIAL_RETRY_MS = 15 * 60_000
 const COOKIE_TTL_MS = 6 * 60 * 60_000
+const DEFAULT_CR_NORMAL_PAGES = 2
 const DEFAULT_CR_PAGES = 5
 const MAX_CR_PAGES = 15
 const BROWSE_PAGE_SIZE = 100
@@ -65,7 +66,7 @@ for (const file of [DB_PATH, TRACKS_PATH, PENDING_PATH, CFG_PATH, ANILIST_CACHE_
 }
 try {
   for (const entry of fs.readdirSync(TMP_DIR)) {
-    if (/\.tmp-\d+-[a-f0-9]+$/i.test(entry)) {
+    if (/\.tmp-\d+-[a-f0-9]+$/i.test(entry) || /^cr-img-\d+-[a-f0-9]+\.img$/i.test(entry)) {
       try { fs.unlinkSync(path.join(TMP_DIR, entry)) } catch {}
     }
   }
@@ -94,17 +95,18 @@ runtime.userAgent ??= NX_UA
 runtime.credentialCache ??= { exp: 0, source: 'fallback', lastError: null }
 runtime.credentialRefresh ??= null
 runtime.lock ??= Promise.resolve()
-runtime.stats ??= {
-  lastCheckAt: 0,
-  lastSuccessAt: 0,
-  lastError: null,
-  lastErrorAt: 0,
-  lastNewCount: 0,
-  lastTrackCount: 0,
-  consecutiveErrors: 0,
-  consecutiveRateLimits: 0,
-  lastDeepScanAt: 0,
-}
+runtime.stats ??= {}
+runtime.stats.lastCheckAt ??= 0
+runtime.stats.lastSuccessAt ??= 0
+runtime.stats.lastError ??= null
+runtime.stats.lastErrorAt ??= 0
+runtime.stats.lastNewCount ??= 0
+runtime.stats.lastTrackCount ??= 0
+runtime.stats.consecutiveErrors ??= 0
+runtime.stats.consecutiveRateLimits ??= 0
+runtime.stats.lastDeepScanAt ??= 0
+runtime.stats.lastCycleMs ??= 0
+runtime.stats.lastBrowseMs ??= 0
 
 applyOverrides()
 
@@ -795,6 +797,11 @@ function getConfiguredPages() {
   return Math.min(MAX_CR_PAGES, Math.max(1, Math.floor(envNum('CR_PAGES', DEFAULT_CR_PAGES, 1))))
 }
 
+function getConfiguredNormalPages() {
+  const deepPages = getConfiguredPages()
+  return Math.min(deepPages, Math.max(1, Math.floor(envNum('CR_NORMAL_PAGES', DEFAULT_CR_NORMAL_PAGES, 1))))
+}
+
 function isTrackedSubtitleLocale(locale) {
   return TRACKED_SUBTITLE_LOCALES.has(locale) || locale === 'en' || locale.startsWith('en-')
 }
@@ -1006,10 +1013,11 @@ function hasPendingTrackOrVersionChange(episode, trackState, seenSet, allowed) {
 }
 
 async function fetchBrowseEpisodes(options = {}) {
-  const configuredPages = getConfiguredPages()
-  const maxPages = Math.max(1, Math.min(MAX_CR_PAGES, options.maxPages || configuredPages))
-  const minPages = Math.max(1, Math.min(maxPages, options.minPages ?? Math.min(maxPages, 2)))
+  const browseStartedAt = Date.now()
   const deepScan = Boolean(options.deepScan)
+  const defaultPages = deepScan ? getConfiguredPages() : getConfiguredNormalPages()
+  const maxPages = Math.max(1, Math.min(MAX_CR_PAGES, options.maxPages || defaultPages))
+  const minPages = Math.max(1, Math.min(maxPages, options.minPages ?? Math.min(maxPages, 2)))
   const limit = Number(options.limit) > 0 ? Math.floor(Number(options.limit)) : 0
   const allowed = getAllowedAudioLocales()
   const seenSet = options.seenSet instanceof Set ? options.seenSet : new Set(loadSeen())
@@ -1105,8 +1113,10 @@ async function fetchBrowseEpisodes(options = {}) {
 
   // Conserva el orden de Crunchyroll, igual que Rikka-TakaradaMD.
   const unique = [...acceptedById.values()]
+  const browseMs = Date.now() - browseStartedAt
+  runtime.stats.lastBrowseMs = browseMs
   const detail = dropped.size ? ` (${[...dropped].map(([reason, count]) => `${reason}:${count}`).join(', ')})` : ''
-  console.log(`[CR-Notify] Browse (${pagesFetched}p${deepScan ? ' profundo' : ''}): ${totalRaw} recibidos | ${unique.length} aceptados | ${totalDropped} descartados${detail}`)
+  console.log(`[CR-Notify] Browse (${pagesFetched}p${deepScan ? ' profundo' : ''}, ${browseMs}ms): ${totalRaw} recibidos | ${unique.length} aceptados | ${totalDropped} descartados${detail}`)
   if (newestCandidate) {
     const minutes = Math.max(0, Math.round((Date.now() - newestCandidate.airTime) / 60000))
     console.log(`[CR-Notify] Más reciente del API: ${newestCandidate.series} Ep. ${newestCandidate.epNum} (${newestCandidate.audioLocale || '?'}) | hace ${minutes} min`)
@@ -1524,23 +1534,74 @@ async function fetchImageBuffer(url) {
   }
 }
 
+function writeTempImage(buffer) {
+  if (!buffer?.length) return null
+  const filePath = path.join(TMP_DIR, `cr-img-${process.pid}-${crypto.randomUUID().slice(0, 8)}.img`)
+  try {
+    fs.writeFileSync(filePath, buffer)
+    try { fs.chmodSync(filePath, 0o600) } catch {}
+    return filePath
+  } catch {
+    try { fs.unlinkSync(filePath) } catch {}
+    return null
+  }
+}
+
+function formatAgeMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—'
+  const totalSec = Math.round(ms / 1000)
+  if (totalSec < 60) return `${totalSec}s`
+  const mins = Math.floor(totalSec / 60)
+  const secs = totalSec % 60
+  if (mins < 60) return `${mins}m ${String(secs).padStart(2, '0')}s`
+  const hours = Math.floor(mins / 60)
+  return `${hours}h ${String(mins % 60).padStart(2, '0')}m`
+}
+
 async function prepareEpisodePayload(episode, notification = null) {
+  const prepStartedAt = Date.now()
   const [resolvedSeries, imageBuffer] = await Promise.all([
     anilistTitle(episode.series),
     episode.image ? fetchImageBuffer(episode.image) : Promise.resolve(null),
   ])
+  const imageFilePath = imageBuffer ? writeTempImage(imageBuffer) : null
+  let cleaned = false
   return {
     text: caption({ ...episode, series: resolvedSeries }, notification),
     imageBuffer,
+    imageFilePath,
     imageUrl: episode.image || '',
+    // Baileys cifra medios para grupos/chats y sube crudo para canales (@newsletter);
+    // usar cachés separadas evita cruzar formatos y reutiliza una sola subida por tipo.
+    groupMediaCache: new Map(),
+    newsletterMediaCache: new Map(),
+    prepMs: Date.now() - prepStartedAt,
+    cleanup() {
+      if (cleaned) return
+      cleaned = true
+      if (imageFilePath) {
+        try { fs.unlinkSync(imageFilePath) } catch {}
+      }
+    },
   }
 }
 
 async function deliverPayload(sock, jid, payload, quoted = null) {
-  const options = quoted ? { quoted } : {}
+  const baseOptions = quoted ? { quoted } : {}
+  const mediaCache = isNewsletterJid(jid) ? payload.newsletterMediaCache : payload.groupMediaCache
+  const mediaOptions = mediaCache ? { ...baseOptions, mediaCache } : baseOptions
+
+  if (payload.imageFilePath) {
+    try {
+      await sock.sendMessage(jid, { image: { url: payload.imageFilePath }, caption: payload.text }, mediaOptions)
+      return
+    } catch (error) {
+      console.warn(`[CR-Notify] Envío de imagen (caché local) falló para ${jid}; probando respaldo: ${error.message}`)
+    }
+  }
   if (payload.imageBuffer) {
     try {
-      await sock.sendMessage(jid, { image: payload.imageBuffer, caption: payload.text }, options)
+      await sock.sendMessage(jid, { image: payload.imageBuffer, caption: payload.text }, baseOptions)
       return
     } catch (error) {
       console.warn(`[CR-Notify] Envío de imagen (buffer) falló para ${jid}; probando respaldo: ${error.message}`)
@@ -1548,18 +1609,22 @@ async function deliverPayload(sock, jid, payload, quoted = null) {
   }
   if (payload.imageUrl) {
     try {
-      await sock.sendMessage(jid, { image: { url: payload.imageUrl }, caption: payload.text }, options)
+      await sock.sendMessage(jid, { image: { url: payload.imageUrl }, caption: payload.text }, mediaOptions)
       return
     } catch (error) {
       console.warn(`[CR-Notify] Envío de imagen (URL) falló para ${jid}; enviando solo texto: ${error.message}`)
     }
   }
-  await sock.sendMessage(jid, { text: payload.text }, options)
+  await sock.sendMessage(jid, { text: payload.text }, baseOptions)
 }
 
 async function sendEpisode(sock, jid, episode, quoted = null, notification = null) {
   const payload = await prepareEpisodePayload(episode, notification)
-  await deliverPayload(sock, jid, payload, quoted)
+  try {
+    await deliverPayload(sock, jid, payload, quoted)
+  } finally {
+    payload.cleanup()
+  }
 }
 
 async function withLock(fn) {
@@ -1651,7 +1716,7 @@ function startCron(sock) {
     timer.unref?.()
   }
   schedule(10_000)
-  console.log(`[CR-Notify] Cron activo → cada ${intervalLabel} | ${(cfg.targetJids || []).length} destino(s) configurado(s) | hasta ${getConfiguredPages()} pág.`)
+  console.log(`[CR-Notify] Cron activo → cada ${intervalLabel} | ${(cfg.targetJids || []).length} destino(s) configurado(s) | ${getConfiguredNormalPages()} pág. normal / ${getConfiguredPages()} pág. profundo`)
   console.log(`[CR-Notify] Auto-inicio | Destinos: ${(cfg.targetJids || []).length} | Modo: ${cfg.loggedIn ? 'Cuenta real' : 'Anónimo'} | Cron: ON`)
   console.log(`[CR-Notify] Delays → JID: ${SEND_JID_DELAY_MS}ms | Ep: ${SEND_DELAY_MS}ms | Browse: ${BROWSE_TIMEOUT_MS}ms`)
 }
@@ -1673,24 +1738,32 @@ async function checkAndSend(sock, manual = false) {
   }
   console.log(`[CR-Notify] Revisión ${manual ? 'manual' : 'programada'} iniciada | Destinos: ${initialJids.length}`)
   runtime.cronRunning = true
-  runtime.stats.lastCheckAt = Date.now()
+  const cycleStartedAt = Date.now()
+  runtime.stats.lastCheckAt = cycleStartedAt
   try {
     return await withLock(async () => {
       const deepScan = manual || (Date.now() - (runtime.stats.lastDeepScanAt || 0) >= DEEP_SCAN_INTERVAL_MS)
       const notifications = await fetchNew({ deepScan })
-      runtime.stats.lastSuccessAt = Date.now()
+      const detectedAt = Date.now()
+      const detectMs = detectedAt - cycleStartedAt
+      runtime.stats.lastSuccessAt = detectedAt
       runtime.stats.lastError = null
       runtime.stats.consecutiveErrors = 0
       runtime.stats.consecutiveRateLimits = 0
-      if (deepScan) runtime.stats.lastDeepScanAt = Date.now()
+      if (deepScan) runtime.stats.lastDeepScanAt = detectedAt
 
-      if (!notifications.length) return { sent: 0, total: 0, skipped: null }
+      if (!notifications.length) {
+        runtime.stats.lastCycleMs = detectMs
+        console.log(`[CR-Notify] Revisión sin novedades en ${detectMs}ms.`)
+        return { sent: 0, total: 0, skipped: null, detectMs, totalMs: detectMs }
+      }
 
       const pending = loadPending()
       let sent = 0
       let partial = 0
 
-      for (const notification of notifications) {
+      for (let notifIndex = 0; notifIndex < notifications.length; notifIndex++) {
+        const notification = notifications[notifIndex]
         const currentJids = loadCfg().targetJids || []
         if (!currentJids.length) break
 
@@ -1706,27 +1779,37 @@ async function checkAndSend(sock, manual = false) {
 
         if (remainingJids.length) {
           const payload = await prepareEpisodePayload(episode, notification)
-          for (let i = 0; i < remainingJids.length; i++) {
-            const jid = remainingJids[i]
-            const liveSock = getSock(activeSock)
-            try {
-              if (!isSockReady(liveSock)) throw new Error('Sesión de WhatsApp desconectada')
-              await deliverPayload(liveSock, jid, payload)
-              deliveredSet.add(jid)
-              if (i < remainingJids.length - 1) {
-                pending[notification.key] = {
-                  deliveredJids: [...deliveredSet],
-                  attempts: existingPending.attempts || 0,
-                  firstFailedAt: existingPending.firstFailedAt || Date.now(),
-                  lastAttemptAt: Date.now(),
+          const deliverStartedAt = Date.now()
+          let sentNow = 0
+          try {
+            for (let i = 0; i < remainingJids.length; i++) {
+              const jid = remainingJids[i]
+              const liveSock = getSock(activeSock)
+              try {
+                if (!isSockReady(liveSock)) throw new Error('Sesión de WhatsApp desconectada')
+                await deliverPayload(liveSock, jid, payload)
+                deliveredSet.add(jid)
+                sentNow++
+                if (i < remainingJids.length - 1) {
+                  pending[notification.key] = {
+                    deliveredJids: [...deliveredSet],
+                    attempts: existingPending.attempts || 0,
+                    firstFailedAt: existingPending.firstFailedAt || Date.now(),
+                    lastAttemptAt: Date.now(),
+                  }
+                  savePending(pending)
+                  if (SEND_JID_DELAY_MS) await delay(SEND_JID_DELAY_MS)
                 }
-                savePending(pending)
+              } catch (error) {
+                console.error(`[CR-Notify] Error enviando ${episode.id} a ${jid}:`, error.message)
               }
-              if (SEND_JID_DELAY_MS) await delay(SEND_JID_DELAY_MS)
-            } catch (error) {
-              console.error(`[CR-Notify] Error enviando ${episode.id} a ${jid}:`, error.message)
             }
+          } finally {
+            payload.cleanup()
           }
+          const deliverMs = Date.now() - deliverStartedAt
+          const ageLabel = episode.airTime > 0 ? formatAgeMs(Math.max(0, detectedAt - episode.airTime)) : '—'
+          console.log(`[CR-Notify] Envío ${episode.id} (${episode.series} Ep. ${episode.epNum}) | edad API: ${ageLabel} | prep: ${payload.prepMs}ms | envío (${sentNow}/${remainingJids.length}): ${deliverMs}ms`)
         }
 
         const failedJids = currentJids.filter((jid) => !deliveredSet.has(jid))
@@ -1758,11 +1841,14 @@ async function checkAndSend(sock, manual = false) {
             partial++
           }
         }
-        if (SEND_DELAY_MS) await delay(SEND_DELAY_MS)
+        if (SEND_DELAY_MS && notifIndex < notifications.length - 1) await delay(SEND_DELAY_MS)
       }
 
-      console.log(`[CR-Notify] ${sent}/${notifications.length} notificación(es) completadas${partial ? ` (${partial} con reintento pendiente)` : ''}.`)
-      return { sent, total: notifications.length, partial, skipped: null }
+      const totalMs = Date.now() - cycleStartedAt
+      const sendTotalMs = totalMs - detectMs
+      runtime.stats.lastCycleMs = totalMs
+      console.log(`[CR-Notify] ${sent}/${notifications.length} notificación(es) completadas en ${totalMs}ms (detección: ${detectMs}ms, envío: ${sendTotalMs}ms)${partial ? ` (${partial} con reintento pendiente)` : ''}.`)
+      return { sent, total: notifications.length, partial, skipped: null, detectMs, totalMs }
     })
   } finally {
     runtime.cronRunning = false
@@ -1962,6 +2048,7 @@ async function runStatus({ msg, isOwner }) {
   const intervalLabel = formatCronInterval(getCronIntervalMs(cfg))
   const exp = formatMxDate(cfg.tokenExp)
   const lastOk = formatMxDate(runtime.stats.lastSuccessAt)
+  const lastDuration = runtime.stats.lastCycleMs ? ` (${runtime.stats.lastCycleMs}ms)` : ''
   const destinations = cfg.targetJids.length
     ? cfg.targetJids.map((jid, index) => `  ${index + 1}. ${isNewsletterJid(jid) ? 'Canal' : 'Grupo'} — ${jid}`).join('\n')
     : `  Ninguno — usa ${getPrefix()}crset o ${getPrefix()}crchanadd`
@@ -1973,9 +2060,9 @@ async function runStatus({ msg, isOwner }) {
     `🔑 Modo: *${cfg.loggedIn ? (cfg.authMode === 'web' ? 'Cuenta real (etp_rt)' : 'Cuenta real') : 'Anónimo'}*\n` +
     `⏳ Token expira: *${exp}*\n` +
     `🔁 Refresh token: *${cfg.refreshToken ? 'Sí' : 'No'}*\n` +
-    `⏱️ Cron: cada *${intervalLabel}* (hasta *${getConfiguredPages()}* pág.)\n` +
+    `⏱️ Cron: cada *${intervalLabel}* (*${getConfiguredNormalPages()}* pág. normal / *${getConfiguredPages()}* pág. profundo)\n` +
     `🔄 Cron activo: *${runtime.cronTimer ? 'Sí' : (cfg.cronDisabled ? 'Detenido' : 'No')}*\n` +
-    `🕒 Última revisión OK: *${lastOk}*\n` +
+    `🕒 Última revisión OK: *${lastOk}*${lastDuration}\n` +
     errorLine +
     `💾 Episodios registrados: *${seen.length}/${MAX_SEEN}*\n` +
     `🈯 Episodios con pistas registradas: *${trackedLanguages}/${MAX_TRACKS}*\n` +
@@ -1999,8 +2086,9 @@ async function runCheck({ msg, sock, isOwner }) {
       return msg.reply(`⚠️ No hay destinos configurados. Usa ${getPrefix()}crset o ${getPrefix()}crchanadd.`)
     }
     await msg.react?.('✅').catch(() => {})
-    if (!result.total) return msg.reply('✅ Revisión profunda completada: no hay episodios ni pistas nuevas.')
-    return msg.reply(`✅ Revisión profunda completada: *${result.sent}/${result.total}* notificación(es) enviadas${result.partial ? ` (${result.partial} en reintento pendiente)` : ''}.`)
+    const timing = Number.isFinite(result.totalMs) ? ` (${result.totalMs}ms)` : ''
+    if (!result.total) return msg.reply(`✅ Revisión profunda completada${timing}: no hay episodios ni pistas nuevas.`)
+    return msg.reply(`✅ Revisión profunda completada${timing}: *${result.sent}/${result.total}* notificación(es) enviadas${result.partial ? ` (${result.partial} en reintento pendiente)` : ''}.`)
   } catch (error) {
     console.error('[CR-Notify] Check manual:', error.message)
     await msg.react?.('❎').catch(() => {})
@@ -2014,11 +2102,11 @@ async function runList({ msg, sock, args, isOwner }) {
   if (limit === null) return msg.reply(usage('crlist'))
   await msg.react?.('⏳').catch(() => {})
   try {
-    const episodes = (await fetchLatest({ limit, minPages: 1 })).slice(0, limit)
+    const episodes = (await fetchLatest({ limit, minPages: 1, maxPages: getConfiguredPages() })).slice(0, limit)
     if (!episodes.length) return msg.reply('📭 No se encontraron episodios recientes.')
-    for (const episode of episodes) {
-      await sendEpisode(sock, msg.chat, episode, msg)
-      if (SEND_DELAY_MS) await delay(SEND_DELAY_MS)
+    for (let i = 0; i < episodes.length; i++) {
+      await sendEpisode(sock, msg.chat, episodes[i], msg)
+      if (SEND_DELAY_MS && i < episodes.length - 1) await delay(SEND_DELAY_MS)
     }
     await msg.react?.('✅').catch(() => {})
   } catch (error) {
@@ -2035,21 +2123,27 @@ async function runNotify({ msg, sock, args, isOwner }) {
   const jids = cfg.targetJids.length ? cfg.targetJids : [msg.chat]
   await msg.react?.('⏳').catch(() => {})
   try {
-    const episodes = (await fetchLatest({ limit, minPages: 1 })).slice(0, limit)
+    const episodes = (await fetchLatest({ limit, minPages: 1, maxPages: getConfiguredPages() })).slice(0, limit)
     if (!episodes.length) return msg.reply('📭 No se encontraron episodios.')
     let failedCount = 0
-    for (const episode of episodes) {
+    for (let epIndex = 0; epIndex < episodes.length; epIndex++) {
+      const episode = episodes[epIndex]
       const payload = await prepareEpisodePayload(episode)
-      for (const jid of jids) {
-        try {
-          await deliverPayload(sock, jid, payload)
-          if (SEND_JID_DELAY_MS) await delay(SEND_JID_DELAY_MS)
-        } catch (error) {
-          failedCount++
-          console.error(`[CR-Notify] Notify error enviando ${episode.id} a ${jid}:`, error.message)
+      try {
+        for (let i = 0; i < jids.length; i++) {
+          const jid = jids[i]
+          try {
+            await deliverPayload(sock, jid, payload)
+            if (SEND_JID_DELAY_MS && i < jids.length - 1) await delay(SEND_JID_DELAY_MS)
+          } catch (error) {
+            failedCount++
+            console.error(`[CR-Notify] Notify error enviando ${episode.id} a ${jid}:`, error.message)
+          }
         }
+      } finally {
+        payload.cleanup()
       }
-      if (SEND_DELAY_MS) await delay(SEND_DELAY_MS)
+      if (SEND_DELAY_MS && epIndex < episodes.length - 1) await delay(SEND_DELAY_MS)
     }
     await msg.react?.(failedCount ? '⚠️' : '✅').catch(() => {})
     if (failedCount) {
@@ -2205,6 +2299,11 @@ export const __test = {
   fetchBrowseEpisodes,
   fetchNew,
   checkAndSend,
+  prepareEpisodePayload,
+  deliverPayload,
+  getConfiguredPages,
+  getConfiguredNormalPages,
+  formatAgeMs,
   runCommand,
   hasPendingTrackOrVersionChange,
   commitNotificationState,

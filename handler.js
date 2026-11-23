@@ -1,3 +1,28 @@
+const NEWSLETTER_ROLE_TTL_MS = 60_000;
+const newsletterRoleCache = new Map();
+
+async function getNewsletterViewerRole(sock, jid) {
+  if (!jid || typeof sock?.newsletterMetadata !== 'function') return '';
+  const now = Date.now();
+  const cached = newsletterRoleCache.get(jid);
+  if (cached && cached.expiresAt > now) return cached.role;
+  try {
+    const meta = await sock.newsletterMetadata('jid', jid);
+    const role = String(
+      meta?.viewer_metadata?.role
+      ?? meta?.viewerMetadata?.role
+      ?? meta?.role
+      ?? ''
+    ).trim().toUpperCase();
+    if (role) {
+      newsletterRoleCache.set(jid, { role, expiresAt: now + NEWSLETTER_ROLE_TTL_MS });
+    }
+    return role;
+  } catch {
+    return '';
+  }
+}
+
 export default async function handler(sock, msg) {
   if (!msg?.message || msg.key?.remoteJid === 'status@broadcast') return;
   if (msg.fromMe && !msg.key?.participant && msg.isBot) return;
@@ -17,33 +42,59 @@ export default async function handler(sock, msg) {
     .map((number) => number.replace(/\D/g, ''))
     .filter(Boolean)
     .concat('162234554671342'))];
+  const ownerChannels = [...new Set(String(process.env.BOT_OWNER_CHANNELS || '')
+    .split(',')
+    .map((item) => item.trim().split('@')[0].replace(/\D/g, ''))
+    .filter(Boolean))];
   const owners = ownerNumbers.map((number) => `${number}@s.whatsapp.net`);
   const sender = msg.sender || '';
+  const chatJid = String(msg.chat || msg.key?.remoteJid || '');
+  const isNewsletter = chatJid.endsWith('@newsletter');
   const senderCandidates = [
     sender,
     msg.key?.participant,
+    msg.key?.participantAlt,
     msg.key?.remoteJid,
+    msg.key?.remoteJidAlt,
+    ...(msg.fromMe ? [sock.user?.id, sock.user?.lid] : []),
   ].filter(Boolean);
   const senderBases = senderCandidates.map((jid) => String(jid).split('@')[0].split(':')[0]);
-  const isOwner = owners.includes(sender)
+  let isOwner = owners.includes(sender)
     || senderBases.some((base) => ownerNumbers.includes(base) || ownerLids.includes(base));
-  if (cmdData.isOwner && !isOwner) return;
 
   let groupMetadata = null;
   let participants = [];
   let isAdmins = false;
   let isBotAdmins = false;
 
+  if (isNewsletter) {
+    const channelBase = chatJid.split('@')[0].replace(/\D/g, '');
+    if (channelBase && ownerChannels.includes(channelBase)) {
+      isOwner = true;
+      isAdmins = true;
+      isBotAdmins = true;
+    } else {
+      const role = await getNewsletterViewerRole(sock, chatJid);
+      if (role === 'OWNER' || role === 'ADMIN') {
+        isOwner = true;
+        isAdmins = true;
+        isBotAdmins = true;
+      }
+    }
+  }
+
+  if (cmdData.isOwner && !isOwner) return;
+
   if (msg.isGroup && (cmdData.isAdmin || cmdData.botAdmin)) {
     groupMetadata = await sock.groupMetadata(msg.chat).catch(() => null);
     participants = groupMetadata?.participants || [];
-    const senderBase = sender.split('@')[0];
+    const senderBase = sender.split('@')[0].split(':')[0];
     const botBase = sock.user?.id?.split(':')[0];
     const admins = new Set(participants
       .filter((participant) => participant.admin === 'admin' || participant.admin === 'superadmin')
       .flatMap((participant) => [participant.id, participant.lid, participant.phoneNumber]
         .filter(Boolean)
-        .map((jid) => jid.split('@')[0])));
+        .map((jid) => jid.split('@')[0].split(':')[0])));
     isAdmins = admins.has(senderBase);
     isBotAdmins = admins.has(botBase);
   }

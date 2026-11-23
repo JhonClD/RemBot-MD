@@ -1859,8 +1859,29 @@ function stripJidBase(jid) {
   return String(jid || '').split('@')[0].split(':')[0]
 }
 
-function canManageGroup(msg, sock, isOwner) {
+function isNewsletterJid(jid) {
+  return typeof jid === 'string' && /^[A-Za-z0-9._-]+@newsletter$/i.test(jid)
+}
+
+async function isChannelAdmin(sock, jid) {
+  if (!isNewsletterJid(jid) || typeof sock?.newsletterMetadata !== 'function') return false
+  try {
+    const metadata = await sock.newsletterMetadata('jid', jid)
+    const role = String(
+      metadata?.viewer_metadata?.role
+      ?? metadata?.viewerMetadata?.role
+      ?? metadata?.role
+      ?? ''
+    ).trim().toUpperCase()
+    return role === 'OWNER' || role === 'ADMIN'
+  } catch {
+    return false
+  }
+}
+
+async function canManageGroup(msg, sock, isOwner) {
   if (isOwner) return true
+  if (isNewsletterJid(msg.chat)) return isChannelAdmin(sock, msg.chat)
   if (!msg.isGroup) return false
   return sock.groupMetadata(msg.chat).then((metadata) => {
     const sender = stripJidBase(msg.sender)
@@ -1869,10 +1890,6 @@ function canManageGroup(msg, sock, isOwner) {
       return ids.includes(sender) && ['admin', 'superadmin'].includes(participant.admin)
     })
   }).catch(() => false)
-}
-
-function isNewsletterJid(jid) {
-  return typeof jid === 'string' && /^[A-Za-z0-9._-]+@newsletter$/i.test(jid)
 }
 
 function parseNewsletterTarget(raw) {
@@ -1902,7 +1919,8 @@ async function resolveNewsletterTarget(sock, raw) {
   const metadata = await sock.newsletterMetadata(target.type, target.key)
   const jid = metadata?.id || (target.type === 'jid' ? target.key : '')
   if (!isNewsletterJid(jid)) throw new Error('No pude resolver ese canal de WhatsApp.')
-  return { jid: `${jid.slice(0, jid.lastIndexOf('@'))}@newsletter`, name: String(metadata?.name || '').trim() }
+  const rawName = metadata?.name || metadata?.thread_metadata?.name?.text || metadata?.thread_metadata?.name || ''
+  return { jid: `${jid.slice(0, jid.lastIndexOf('@'))}@newsletter`, name: String(rawName).trim() }
 }
 
 function usage(command = 'crnotify') {
@@ -1919,7 +1937,7 @@ function parseNotifyLimit(args) {
 
 async function runLogin({ msg, sock, args, isOwner }) {
   if (!isOwner) return msg.reply('⛔ Solo el dueño puede iniciar sesión en Crunchyroll.')
-  if (msg.isGroup) return msg.reply(`⛔ Usa ${getPrefix()}crlogin únicamente por privado.`)
+  if (msg.isGroup || isNewsletterJid(msg.chat)) return msg.reply(`⛔ Usa ${getPrefix()}crlogin únicamente por privado.`)
   const first = args[0]
   const password = args.slice(1).join(' ')
   const usageText = `💡 Uso: ${getPrefix()}crlogin correo contraseña\nO: ${getPrefix()}crlogin etp_rt`
@@ -1952,29 +1970,42 @@ async function runLogout({ msg, isOwner }) {
 }
 
 async function runSet({ msg, sock, isOwner }) {
-  if (!(await canManageGroup(msg, sock, isOwner))) return msg.reply('⛔ Solo un administrador del grupo o el dueño puede usar este comando.')
+  const isChannel = isNewsletterJid(msg.chat)
+  if (!(await canManageGroup(msg, sock, isOwner))) {
+    return msg.reply(isChannel
+      ? '⛔ Solo el dueño o un administrador del canal puede usar este comando.'
+      : '⛔ Solo un administrador del grupo o el dueño puede usar este comando.')
+  }
   const cfg = updateCfg((draft) => {
     if (!draft.targetJids.includes(msg.chat)) draft.targetJids.push(msg.chat)
     draft.cronDisabled = false
   })
   startCron(sock)
-  return msg.reply(`✅ Grupo añadido al notificador. Total de destinos: ${cfg.targetJids.length}`)
+  return msg.reply(`✅ ${isChannel ? 'Canal' : 'Grupo'} añadido al notificador. Total de destinos: ${cfg.targetJids.length}`)
 }
 
 async function runRemove({ msg, sock, isOwner }) {
-  if (!(await canManageGroup(msg, sock, isOwner))) return msg.reply('⛔ Solo un administrador del grupo o el dueño puede usar este comando.')
+  const isChannel = isNewsletterJid(msg.chat)
+  if (!(await canManageGroup(msg, sock, isOwner))) {
+    return msg.reply(isChannel
+      ? '⛔ Solo el dueño o un administrador del canal puede usar este comando.'
+      : '⛔ Solo un administrador del grupo o el dueño puede usar este comando.')
+  }
   let removed = false
   const cfg = updateCfg((draft) => {
     const before = draft.targetJids.length
     draft.targetJids = draft.targetJids.filter((jid) => jid !== msg.chat)
     removed = draft.targetJids.length < before
   })
-  return msg.reply(!removed ? '⚠️ Este grupo no estaba configurado.' : `🗑️ Grupo eliminado. Quedan: ${cfg.targetJids.length}`)
+  const label = isChannel ? 'canal' : 'grupo'
+  return msg.reply(!removed ? `⚠️ Este ${label} no estaba configurado.` : `🗑️ ${isChannel ? 'Canal' : 'Grupo'} eliminado. Quedan: ${cfg.targetJids.length}`)
 }
 
 async function runChannelAdd({ msg, sock, args, isOwner }) {
-  if (!isOwner) return msg.reply('⛔ Solo el dueño puede añadir canales.')
-  const inputs = (args || []).flatMap((value) => String(value).split(',').map((item) => item.trim()).filter(Boolean))
+  const allowed = isOwner || (isNewsletterJid(msg.chat) && await isChannelAdmin(sock, msg.chat))
+  if (!allowed) return msg.reply('⛔ Solo el dueño puede añadir canales.')
+  let inputs = (args || []).flatMap((value) => String(value).split(',').map((item) => item.trim()).filter(Boolean))
+  if (!inputs.length && isNewsletterJid(msg.chat)) inputs = [msg.chat]
   if (!inputs.length) return msg.reply(`Uso: ${getPrefix()}crchanadd <ID, JID @newsletter o enlace de canal> [...]`)
 
   const results = []
@@ -2005,8 +2036,10 @@ async function runChannelAdd({ msg, sock, args, isOwner }) {
 }
 
 async function runChannelRemove({ msg, sock, args, isOwner }) {
-  if (!isOwner) return msg.reply('⛔ Solo el dueño puede quitar canales.')
-  const inputs = (args || []).flatMap((value) => String(value).split(',').map((item) => item.trim()).filter(Boolean))
+  const allowed = isOwner || (isNewsletterJid(msg.chat) && await isChannelAdmin(sock, msg.chat))
+  if (!allowed) return msg.reply('⛔ Solo el dueño puede quitar canales.')
+  let inputs = (args || []).flatMap((value) => String(value).split(',').map((item) => item.trim()).filter(Boolean))
+  if (!inputs.length && isNewsletterJid(msg.chat)) inputs = [msg.chat]
   if (!inputs.length) return msg.reply(`Uso: ${getPrefix()}crchanrem <ID, JID @newsletter o enlace de canal> [...]`)
 
   const results = []

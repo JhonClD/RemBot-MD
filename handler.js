@@ -26,6 +26,7 @@ async function getNewsletterViewerRole(sock, jid) {
 export default async function handler(sock, msg) {
   if (!msg?.message || msg.key?.remoteJid === 'status@broadcast') return;
   if (msg.fromMe && !msg.key?.participant && msg.isBot) return;
+  if (msg.usedPrefix !== '`') return;
 
   const command = String(msg.command || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   if (!command) return;

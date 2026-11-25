@@ -7,7 +7,7 @@ import chalk from "chalk";
 import fs from "fs";
 import path from "path";
 import readlineSync from "readline-sync";
-import { smsg, deleteCachedMeta } from "#serialize";
+import { smsg, deleteCachedMeta, ensureAudioStickerProto, wrapOutgoingAudioSticker } from "#serialize";
 import cmdsLoader from '#cmdsloader';
 
 const log = {
@@ -107,6 +107,7 @@ export async function startBot() {
   const saveCreds = () => { clearTimeout(saveCredsTimer); saveCredsTimer = setTimeout(saveCredsDB, 2000); };
   console.info = () => {};
   console.debug = () => {};
+  ensureAudioStickerProto();
   const sock = makeWASocket({
     version,
     logger: pino({ level: 'silent' }),
@@ -118,11 +119,26 @@ export async function startBot() {
     generateHighQualityLinkPreview: true,
     shouldIgnoreJid: (jid) => jid.endsWith('@broadcast'),
     keepAliveIntervalMs: 25_000,
+    patchMessageBeforeSending: (message) => wrapOutgoingAudioSticker(message),
     getMessage: async (key) => msgStore.get(key.remoteJid + ':' + key.id),
   });
 
   global.sock = sock;
   sock.ev.on("creds.update", saveCreds);
+  sock.loadMessage = async (jid, id) => {
+    if (!id) return null;
+    if (jid) {
+      const hit = msgStore.get(`${jid}:${id}`);
+      if (hit) return { key: { remoteJid: jid, id }, message: hit };
+    }
+    const suffix = `:${id}`;
+    for (const [k, v] of msgStore) {
+      if (k.endsWith(suffix)) {
+        return { key: { remoteJid: k.slice(0, -suffix.length), id }, message: v };
+      }
+    }
+    return null;
+  };
   sock.sendText = (jid, text, quoted = "", options) => sock.sendMessage(jid, { text, ...options }, { quoted });
   sock.decodeJid = (jid) => {
     if (!jid) return jid;
@@ -148,14 +164,16 @@ export async function startBot() {
   }
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (!botReady) return;
-    if (type !== 'notify') return;
-    for (const msg of messages) {
+    for (const msg of messages ?? []) {
       if (msg?.message && msg?.key?.id) {
         const sid = msg.key.remoteJid + ':' + msg.key.id;
         msgStore.set(sid, msg.message);
         if (msgStore.size > msgLimit) msgStore.delete(msgStore.keys().next().value);
       }
+    }
+    if (!botReady) return;
+    if (type !== 'notify') return;
+    for (const msg of messages) {
       try {
         if (!msg?.message || msg.key?.remoteJid === "status@broadcast") continue;
         if ((msg.messageTimestamp * 1000) < bootTime - 15_000) continue;

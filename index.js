@@ -41,7 +41,7 @@ console.log(chalk.cyan(`
 
 if (!fs.existsSync('./lib/system/tmp')) fs.mkdirSync('./lib/system/tmp', { recursive: true });
 const msgStore = new Map();
-const msgLimit = 500;
+const msgLimit = 2000;
 
 function clearSession() {
   try {
@@ -163,6 +163,16 @@ export async function startBot() {
       }
     }, 3000);
   }
+
+  sock.ev.on("messaging-history.set", ({ messages }) => {
+    for (const msg of messages ?? []) {
+      if (msg?.message && msg?.key?.id && msg.key.remoteJid) {
+        const sid = msg.key.remoteJid + ':' + msg.key.id;
+        msgStore.set(sid, msg.message);
+        if (msgStore.size > msgLimit) msgStore.delete(msgStore.keys().next().value);
+      }
+    }
+  });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     for (const msg of messages ?? []) {

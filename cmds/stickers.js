@@ -9,6 +9,7 @@ import {
   sendAudioSticker,
   downloadStickerAudio,
   stickerToMedia,
+  convertGifOrMedia,
   extractAudioToMp3,
 } from '../lib/exif.js';
 
@@ -33,7 +34,7 @@ const AUDIO_CMDS = new Set(['saudio', 'sa', 'ssound', 'stickeraudio']);
 const CROP_CMDS = new Set(['scrop', 'sfull']);
 const CIRCLE_CMDS = new Set(['scircle', 'sredondo']);
 const WM_CMDS = new Set(['wm', 'take', 'robar']);
-const TOVID_CMDS = new Set(['toimg', 'tovid', 'tomp4']);
+const TOVID_CMDS = new Set(['toimg', 'tovid', 'tomp4', 'togif']);
 const TOAUD_CMDS = new Set(['toaud', 'tomp3']);
 
 const cleanupTimer = setInterval(() => {
@@ -685,31 +686,156 @@ async function handleWm({ msg, sock, command, usedPrefix, text }) {
   return await sendNormalSticker(sock, msg.chat, newWebp, isAnim, msg);
 }
 
-async function handleToVidOrImg({ msg, sock, command, usedPrefix }) {
-  const p = usedPrefix || '`';
-  const toImageOnly = command === 'toimg';
-  const quotedInfo = classifyMedia(msg.quoted);
-  if (!msg.quoted || quotedInfo?.kind !== 'sticker') {
-    return msg.reply(`Responde a un sticker con *${p}${command}* para convertirlo.`);
-  }
-
-  const webpBuf = await downloadTargetBuffer(msg.quoted, quotedInfo, sock);
-  if (toImageOnly) {
-    const imgRes = await stickerToMedia(webpBuf, { toImageOnly: true });
+async function sendExtractedResult(sock, msg, res, { asDoc = false } = {}) {
+  if (asDoc) {
+    const ext = res.type === 'image' ? 'png' : 'mp4';
     return await sock.sendMessage(
       msg.chat,
-      { image: imgRes.buffer, mimetype: 'image/png' },
+      {
+        document: res.buffer,
+        mimetype: res.mimetype,
+        fileName: `sticker_${Date.now().toString(36)}.${ext}`,
+      },
+      { quoted: msg },
+    );
+  }
+  if (res.type === 'image') {
+    return await sock.sendMessage(
+      msg.chat,
+      { image: res.buffer, mimetype: res.mimetype || 'image/png' },
+      { quoted: msg },
+    );
+  }
+  if (res.type === 'gif') {
+    return await sock.sendMessage(
+      msg.chat,
+      { video: res.buffer, mimetype: 'video/mp4', gifPlayback: true },
+      { quoted: msg },
+    );
+  }
+  return await sock.sendMessage(
+    msg.chat,
+    { video: res.buffer, mimetype: 'video/mp4' },
+    { quoted: msg },
+  );
+}
+
+async function handleToVidOrImg({ msg, sock, command, usedPrefix, text }) {
+  const p = usedPrefix || '`';
+  const rawFlags = String(text || '').trim();
+  const forceImageOnly = /(?:^|\s)--?(?:img|foto|png)(?=\s|$)/i.test(rawFlags);
+  const forceVideo =
+    command === 'tovid' ||
+    command === 'tomp4' ||
+    /(?:^|\s)--?(?:vid|mp4|video)(?=\s|$)/i.test(rawFlags);
+  const toGif =
+    command === 'togif' || /(?:^|\s)(?:--?gif|gif)(?=\s|$)/i.test(rawFlags);
+  const mute = /(?:^|\s)--?(?:mute|m|sin[-_]?audio)(?=\s|$)/i.test(rawFlags);
+  const asDoc = /(?:^|\s)(?:--?doc|doc)(?=\s|$)/i.test(rawFlags);
+
+  const quotedInfo = classifyMedia(msg.quoted);
+  const selfInfo = classifyMedia(msg);
+  const target = quotedInfo ? msg.quoted : selfInfo ? msg : null;
+  const targetInfo = quotedInfo || selfInfo;
+
+  if (!target || !targetInfo) {
+    return msg.reply(
+      `Responde a un sticker (estático, animado o con sonido), GIF o multimedia con *${p}${command}*.\n` +
+        `• Sticker estático → saca la foto en alta calidad.\n` +
+        `• Sticker con audio o animado → saca el video completo con o sin audio.\n` +
+        `• Añade *-gif* para recibirlo como GIF en bucle, *-img* para solo foto o *-doc* como archivo.`,
+    );
+  }
+
+  const rawBuf = await downloadTargetBuffer(target, targetInfo, sock);
+
+  if (targetInfo.kind === 'sticker') {
+    const stickerAudio =
+      !mute && !forceImageOnly && !toGif
+        ? await downloadStickerAudio(target).catch(() => null)
+        : null;
+    const res = await stickerToMedia(rawBuf, {
+      audioBuffer: stickerAudio,
+      toImageOnly: forceImageOnly,
+      forceVideo,
+      toGif,
+    });
+    return await sendExtractedResult(sock, msg, res, { asDoc });
+  }
+
+  if (targetInfo.kind === 'gif') {
+    const isRawGif = /^GIF8[79]a/.test(rawBuf.subarray(0, 6).toString('ascii'));
+    if (!isRawGif && !forceImageOnly) {
+      return await sendExtractedResult(
+        sock,
+        msg,
+        {
+          buffer: rawBuf,
+          mimetype: 'video/mp4',
+          type: toGif ? 'gif' : 'video',
+          hasAudio: false,
+        },
+        { asDoc },
+      );
+    }
+    const res = await convertGifOrMedia(rawBuf, 'gif', {
+      toImageOnly: forceImageOnly,
+      toGif,
+      mute: true,
+    });
+    return await sendExtractedResult(sock, msg, res, { asDoc });
+  }
+
+  if (targetInfo.kind === 'image') {
+    if (!forceVideo && !toGif) {
+      return await sendExtractedResult(
+        sock,
+        msg,
+        {
+          buffer: rawBuf,
+          mimetype: targetInfo.mime || 'image/png',
+          type: 'image',
+          hasAudio: false,
+        },
+        { asDoc },
+      );
+    }
+    const res = await convertGifOrMedia(rawBuf, 'image', {
+      toImageOnly: false,
+      toGif,
+      mute: true,
+    });
+    return await sendExtractedResult(sock, msg, res, { asDoc });
+  }
+
+  if (targetInfo.kind === 'video') {
+    const isMp4 = rawBuf.length >= 12 && rawBuf.subarray(4, 8).toString('ascii') === 'ftyp';
+    if (!forceImageOnly && !toGif && !mute && isMp4) {
+      return await sendExtractedResult(
+        sock,
+        msg,
+        { buffer: rawBuf, mimetype: 'video/mp4', type: 'video', hasAudio: true },
+        { asDoc },
+      );
+    }
+    const res = await convertGifOrMedia(rawBuf, 'video', {
+      toImageOnly: forceImageOnly,
+      toGif,
+      mute,
+    });
+    return await sendExtractedResult(sock, msg, res, { asDoc });
+  }
+
+  if (targetInfo.kind === 'audio') {
+    const mp3 = await extractAudioToMp3(rawBuf);
+    return await sock.sendMessage(
+      msg.chat,
+      { audio: mp3.buffer, mimetype: 'audio/mpeg', ptt: false },
       { quoted: msg },
     );
   }
 
-  const stickerAudio = await downloadStickerAudio(msg.quoted).catch(() => null);
-  const vidRes = await stickerToMedia(webpBuf, { audioBuffer: stickerAudio });
-  return await sock.sendMessage(
-    msg.chat,
-    { video: vidRes.buffer, mimetype: 'video/mp4' },
-    { quoted: msg },
-  );
+  return msg.reply(`No se pudo extraer contenido multimedia compatible con *${p}${command}*.`);
 }
 
 async function handleToAud({ msg, sock, command, usedPrefix }) {
@@ -805,11 +931,12 @@ export default {
     'toimg',
     'tovid',
     'tomp4',
+    'togif',
     'toaud',
     'tomp3',
   ],
   category: 'stickers',
   description:
-    'Stickers HD de hasta 60s (512x512 VP8L sin pérdida, animados fluidos 12-24 fps, audio nativo WhatsApp, recorte cuadrado/circular, WM y conversión inversa).',
+    'Stickers HD de hasta 60s (512x512 VP8L sin pérdida, animados fluidos 12-24 fps, audio nativo WhatsApp, recorte cuadrado/circular, WM y conversión inversa universal `toimg/`tovid/`togif/`toaud).',
   run: runStickers,
 };

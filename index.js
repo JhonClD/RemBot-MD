@@ -8,6 +8,7 @@ import fs from "fs";
 import path from "path";
 import readlineSync from "readline-sync";
 import { smsg, deleteCachedMeta, ensureAudioStickerProto, wrapOutgoingAudioSticker } from "#serialize";
+import { handleGroupParticipants } from "./lib/system/welcome.js";
 import cmdsLoader from '#cmdsloader';
 
 const log = {
@@ -186,7 +187,7 @@ export async function startBot() {
     }
   });
 
-  sock.ev.on("group-participants.update", ({ id }) => { deleteCachedMeta(id); });
+  sock.ev.on("group-participants.update", (update) => { deleteCachedMeta(update.id); handleGroupParticipants(sock, update).catch((err) => console.error('[welcome]', err?.message)); });
   sock.ev.on("groups.update", (updates) => { for (const update of updates) deleteCachedMeta(update.id); });
 
   sock.ev.on("connection.update", async (update) => {

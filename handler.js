@@ -1,3 +1,5 @@
+import { getPrefix, getOwnerJid, getChatSettings, bumpMessageCount } from './lib/system/botstore.js';
+
 const NEWSLETTER_ROLE_TTL_MS = 60_000;
 const newsletterRoleCache = new Map();
 
@@ -26,7 +28,8 @@ async function getNewsletterViewerRole(sock, jid) {
 export default async function handler(sock, msg) {
   if (!msg?.message || msg.key?.remoteJid === 'status@broadcast') return;
   if (msg.fromMe && !msg.key?.participant && msg.isBot) return;
-  if (msg.usedPrefix !== '`') return;
+  if (msg.isGroup && msg.sender) bumpMessageCount(msg.chat || msg.key?.remoteJid, msg.sender);
+  if (msg.usedPrefix !== getPrefix()) return;
 
   const command = String(msg.command || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   if (!command) return;
@@ -37,6 +40,7 @@ export default async function handler(sock, msg) {
   const ownerNumbers = [...new Set([
     ...(global.owner || []),
     '51925092348',
+    getOwnerJid(),
   ].map((number) => String(number).replace(/\D/g, '')).filter(Boolean))];
   const ownerLids = [...new Set(String(process.env.BOT_OWNER_LID || '')
     .split(',')
@@ -62,6 +66,9 @@ export default async function handler(sock, msg) {
   const senderBases = senderCandidates.map((jid) => String(jid).split('@')[0].split(':')[0]);
   let isOwner = owners.includes(sender)
     || senderBases.some((base) => ownerNumbers.includes(base) || ownerLids.includes(base));
+
+  // Grupo con el bot apagado (`bot off`): solo el dueño puede volver a encenderlo.
+  if (msg.isGroup && command !== 'bot' && !isOwner && getChatSettings(chatJid).enabled === false) return;
 
   let groupMetadata = null;
   let participants = [];

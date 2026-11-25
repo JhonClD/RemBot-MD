@@ -10,3 +10,4 @@ auth_info_baileys/
 database.json
 *.sqlite
 lib/system/tmp/*
+lib/system/botstore.json

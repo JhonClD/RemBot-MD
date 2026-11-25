@@ -35,6 +35,7 @@ Autenticación (en este orden):
 import argparse
 import json
 import os
+import re
 import pathlib
 import shutil
 import sys
@@ -161,8 +162,8 @@ def build_source_tree(source):
     gitignore = tmp / ".gitignore"
     if gitignore.is_file():
         text = gitignore.read_text()
-        text = text.replace("lib/system/tmp/*", "bot/lib/system/tmp/*")
-        text = text.replace("lib/system/botstore.json", "bot/lib/system/botstore.json")
+        text = re.sub(r"^lib/system/tmp/\*", "bot/lib/system/tmp/*", text, flags=re.MULTILINE)
+        text = re.sub(r"^lib/system/botstore\.json$", "bot/lib/system/botstore.json", text, flags=re.MULTILINE)
         gitignore.write_text(text)
     return tmp, tmp
 

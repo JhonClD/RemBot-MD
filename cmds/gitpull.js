@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -85,6 +86,135 @@ function classifyError(error) {
   return { kind: 'generic', detail }
 }
 
+async function pathExists(p) {
+  try { await fs.access(p); return true } catch { return false }
+}
+
+// La raíz real del repo y la carpeta bot/, válidas en los dos layouts:
+// layout viejo: cmds/gitpull.js -> raíz = cmds/.. ; layout bot/:
+// bot/cmds/gitpull.js -> raíz = bot/cmds/../..
+async function detectRoots() {
+  const cmdsDir = path.dirname(fileURLToPath(import.meta.url))
+  const parent = path.resolve(cmdsDir, '..')
+  if (path.basename(parent) === 'bot'
+    && (await pathExists(path.join(parent, '..', 'start.js')) || await pathExists(path.join(parent, '..', '.git')))) {
+    return { repoRoot: path.resolve(parent, '..'), botDir: parent }
+  }
+  return { repoRoot: parent, botDir: path.join(parent, 'bot') }
+}
+
+const REORG_ENTRIES = ['index.js', 'handler.js', 'settings.js', 'cmds', 'lib', 'assets', '.env.example']
+
+async function moveEntry(src, dest) {
+  const stat = await fs.stat(src)
+  if (stat.isDirectory()) {
+    await fs.mkdir(dest, { recursive: true })
+    for (const entry of await fs.readdir(src)) {
+      await moveEntry(path.join(src, entry), path.join(dest, entry))
+    }
+    await fs.rmdir(src)
+  } else {
+    await fs.mkdir(path.dirname(dest), { recursive: true })
+    await fs.rename(src, dest)
+  }
+}
+
+// Reorganiza el repo al layout bot/ (fix del glob de Pterodactyl: la raíz
+// debe tener un solo .js: start.js). No usa la API del panel: el plugin ya
+// corre dentro del bot, en el hosting, así que mueve los archivos
+// directamente con fs. Mover el directorio cmds/ mientras el proceso corre
+// es seguro: el módulo ya está cargado en memoria. Devuelve
+// { needed, moved, patched }.
+async function reorganizeLayout() {
+  const { repoRoot, botDir } = await detectRoots()
+  const moved = []
+  const patched = []
+  for (const name of REORG_ENTRIES) {
+    const src = path.join(repoRoot, name)
+    if (await pathExists(src)) {
+      await moveEntry(src, path.join(botDir, name))
+      moved.push(name)
+    }
+  }
+  const startJs = path.join(repoRoot, 'start.js')
+  if (!(await pathExists(startJs))) {
+    await fs.writeFile(startJs, "process.chdir('./bot');\nawait import('./bot/index.js');\n")
+    moved.push('start.js (creado)')
+  }
+  const pkgPath = path.join(repoRoot, 'package.json')
+  if (await pathExists(pkgPath)) {
+    try {
+      const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8'))
+      let changed = false
+      if (pkg.main !== 'start.js') { pkg.main = 'start.js'; changed = true }
+      const wantScripts = { start: 'node start.js', 'start:qr': 'node start.js --qr' }
+      if (JSON.stringify(pkg.scripts) !== JSON.stringify(wantScripts)) { pkg.scripts = wantScripts; changed = true }
+      if (pkg.imports) {
+        for (const [key, value] of Object.entries(pkg.imports)) {
+          if (typeof value === 'string' && value.startsWith('./') && !value.startsWith('./bot/')) {
+            pkg.imports[key] = value.replace('./', './bot/', 1)
+            changed = true
+          }
+        }
+      }
+      if (changed) {
+        await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n')
+        patched.push('package.json')
+      }
+    } catch {}
+  }
+  const pingPath = path.join(botDir, 'cmds', 'ping.js')
+  if (await pathExists(pingPath)) {
+    const text = await fs.readFile(pingPath, 'utf8')
+    if (!text.includes('BOT_ROOT')) {
+      const next = text
+        .replace("const REPO_ROOT = path.resolve(__dirname, '..')",
+          "const REPO_ROOT = path.resolve(__dirname, '..', '..')\nconst BOT_ROOT = path.resolve(__dirname, '..')")
+        .replace("const IMAGE_PATH = path.join(REPO_ROOT, 'assets', 'rem-host.png')",
+          "const IMAGE_PATH = path.join(BOT_ROOT, 'assets', 'rem-host.png')")
+        .replace("const exifTempRoot = path.join(REPO_ROOT, 'lib', 'system', path.basename(tempRoot))",
+          "const exifTempRoot = path.join(BOT_ROOT, 'lib', 'system', path.basename(tempRoot))")
+      if (next !== text) {
+        await fs.writeFile(pingPath, next)
+        patched.push('cmds/ping.js')
+      }
+    }
+  }
+  const giPath = path.join(repoRoot, '.gitignore')
+  if (await pathExists(giPath)) {
+    const text = await fs.readFile(giPath, 'utf8')
+    const next = text
+      .replace(/^lib\/system\/tmp\/\*/m, 'bot/lib/system/tmp/*')
+      .replace(/^lib\/system\/botstore\.json$/m, 'bot/lib/system/botstore.json')
+    if (next !== text) {
+      await fs.writeFile(giPath, next)
+      patched.push('.gitignore')
+    }
+  }
+  return { needed: moved.length > 0 || patched.length > 0, moved, patched }
+}
+
+// ¿El layout actual necesita reorganización? (archivos de código en la raíz
+// o falta start.js). Se usa para el aviso en el mensaje de cambios locales.
+async function layoutNeedsReorg() {
+  try {
+    const { repoRoot } = await detectRoots()
+    if (!(await pathExists(path.join(repoRoot, 'start.js')))) return true
+    for (const name of REORG_ENTRIES) {
+      if (await pathExists(path.join(repoRoot, name))) return true
+    }
+    return false
+  } catch { return false }
+}
+
+function reorgNote(result) {
+  if (!result?.needed) return ''
+  const parts = []
+  if (result.moved.length) parts.push(`movido a \`bot/\`: ${result.moved.join(', ')}`)
+  if (result.patched.length) parts.push(`ajustado: ${result.patched.join(', ')}`)
+  return `\n\n📁 *Reorganización aplicada (fix glob Pterodactyl):* ${parts.join(' · ')}.\n_El próximo arranque usará el layout \`bot/\` con un solo \`.js\` en la raíz (\`start.js\`)._`
+}
+
 function errorText({ kind, detail }, { branch, remote }) {
   const base = `${HEADING}\n\n*[ ❌ ] No se pudo actualizar.*\n\n`
   switch (kind) {
@@ -104,7 +234,7 @@ function errorText({ kind, detail }, { branch, remote }) {
 export default {
   command: ['gitpull', 'update', 'actualizar'],
   category: 'owner',
-  description: 'Actualiza el bot desde GitHub: `gitpull` (normal), `gitpull --check` (solo revisa), `gitpull --force` (descarta cambios locales), `gitpull --restart` (reinicia tras actualizar). Solo propietario.',
+  description: 'Actualiza el bot desde GitHub y reorganiza el layout a bot/ (fix glob Pterodactyl) tras actualizar: `gitpull` (normal), `gitpull --check` (solo revisa), `gitpull --force` (descarta cambios locales), `gitpull --restart` (reinicia tras actualizar). Solo propietario.',
   isOwner: true,
   run: async (context) => {
     const { msg, sock, args = [], isOwner } = context
@@ -120,7 +250,7 @@ export default {
         '• `gitpull --check` — solo revisa qué hay nuevo, sin tocar nada\n' +
         '• `gitpull --force` — descarta cambios locales y deja la copia igual a GitHub\n' +
         '• `gitpull --restart` — tras actualizar, reinicia el proceso (solo si usas pm2 o un supervisor; si lo corres con `node index.js` directo, el bot no vuelve solo)\n\n' +
-        '_Los plugins en \`cmds/\` se recargan solos al cambiar. Los cambios en \`index.js\`, \`handler.js\` o \`lib/\` necesitan reinicio._',
+        '_Tras cada actualización el plugin reorganiza el repo al layout `bot/` (mueve el código, crea `start.js` y ajusta `package.json`): así el próximo arranque no falla con el error del glob de Pterodactyl. Los plugins en \`cmds/\` se recargan solos al cambiar. Los cambios en \`index.js\`, \`handler.js\` o \`lib/\` necesitan reinicio._',
       )
     }
 
@@ -186,22 +316,38 @@ export default {
 
       // 4) Cambios locales: el pull normal se niega; --force los descarta.
       if (dirty && !opts.force) {
+        const needsReorg = await layoutNeedsReorg().catch(() => false)
+        const reorgHint = needsReorg
+          ? `\n\n📁 _Si esos cambios son la reorganización a \`bot/\`, usa *\`gitpull --force\`*: el plugin la vuelve a aplicar solo después del reset._`
+          : ''
         await finishReply(context, progress,
           `${HEADING}\n\n*[ ⚠️ ] No ejecuté \`git pull\`: hay cambios locales en archivos rastreados (${status.total}).*\n\n` +
           `${status.shown.map((f) => `*• ${f}*`).join('\n')}${status.total > status.shown.length ? `\n_...y ${status.total - status.shown.length} más._` : ''}\n\n` +
-          `_Guárdalos con \`git stash\` o descártalos con *\`gitpull --force\`*._`)
+          `_Guárdalos con \`git stash\` o descártalos con *\`gitpull --force\`*._${reorgHint}`)
         return
       }
 
       // --force sin nada nuevo en GitHub: igual descarta lo local.
       if (opts.force && behind === 0 && (dirty || ahead > 0)) {
         await runGit(['reset', '--hard', '@{u}'])
-        await finishReply(context, progress, `${HEADING}\n\n*[ ✅ ] Copia local restaurada a GitHub.*\n\n_Se descartaron los cambios locales y los commits sin subir. No había nada nuevo que descargar en \`${branch}\`._`)
+        let reorg = null
+        try { reorg = await reorganizeLayout() } catch {}
+        await finishReply(context, progress, `${HEADING}\n\n*[ ✅ ] Copia local restaurada a GitHub.*\n\n_Se descartaron los cambios locales y los commits sin subir. No había nada nuevo que descargar en \`${branch}\`._${reorgNote(reorg)}`)
+        if (opts.restart) {
+          await msg.reply('🔁 Reiniciando el proceso en 2 segundos...').catch(() => {})
+          setTimeout(() => process.exit(0), 2000)
+        }
         return
       }
 
       if (behind === 0 && ahead === 0) {
-        await finishReply(context, progress, `${HEADING}\n✅ 𝗘𝗹 𝗯𝗼𝘁 𝘆𝗮 𝗲𝘀𝘁á 𝗮𝗰𝘁𝘂𝗮𝗹𝗶𝘇𝗮𝗱𝗼.\n_No hay cambios pendientes en \`${branch}\`._`)
+        let reorg = null
+        try { reorg = await reorganizeLayout() } catch {}
+        await finishReply(context, progress, `${HEADING}\n✅ 𝗘𝗹 𝗯𝗼𝘁 𝘆𝗮 𝗲𝘀𝘁á 𝗮𝗰𝘁𝘂𝗮𝗹𝗶𝘇𝗮𝗱𝗼.\n_No hay cambios pendientes en \`${branch}\`._${reorgNote(reorg)}`)
+        if (reorg?.needed && opts.restart) {
+          await msg.reply('🔁 Reiniciando el proceso en 2 segundos...').catch(() => {})
+          setTimeout(() => process.exit(0), 2000)
+        }
         return
       }
       if (behind === 0 && ahead > 0) {
@@ -220,6 +366,15 @@ export default {
       const applied = lines((await runGit(['log', '--oneline', `${oldHead}..${newHead}`]).catch(() => ({ stdout: '' }))).stdout, MAX_COMMITS_LISTED)
       const changedNames = (await runGit(['diff', '--name-only', `${oldHead}..${newHead}`]).catch(() => ({ stdout: '' }))).stdout || ''
       const changed = lines(changedNames, MAX_FILES_LISTED)
+      // Reorganizar el layout tras actualizar: el pull trae el layout viejo
+      // de main y sin esto el próximo arranque fallaría con el error del glob.
+      const notes = []
+      let reorg = null
+      let reorgError = ''
+      try { reorg = await reorganizeLayout() } catch (error) { reorgError = safeOutput(error?.message).slice(0, 300) }
+      if (reorg?.needed) notes.push('📁 *Layout reorganizado a `bot/`* (fix glob Pterodactyl): el próximo arranque usará `start.js`.')
+      if (reorgError) notes.push(`⚠️ *La reorganización falló:* ${reorgError}. Revisa los archivos en el servidor.`)
+
       const needsInstall = /(^|\n)package\.json(\n|$)/.test(changedNames) || /(^|\n)package-lock\.json(\n|$)/.test(changedNames)
       const coreChanged = /(^|\n)(index\.js|handler\.js|settings\.js|lib\/)/.test(changedNames)
       const onlyPlugins = changed.total > 0 && changedNames.split('\n').filter(Boolean).every((f) => f.startsWith('cmds/'))
@@ -227,7 +382,6 @@ export default {
       const commitsText = applied.shown.length
         ? `\n\n*Aplicado (${applied.total}):*\n${applied.shown.map((c) => `• \`${c.replace(/`/g, "'")}\``).join('\n')}${applied.total > applied.shown.length ? `\n_...y ${applied.total - applied.shown.length} más._` : ''}`
         : ''
-      const notes = []
       if (needsInstall) notes.push('📦 *Cambió `package.json`*: corre `npm install` en el servidor antes de reiniciar.')
       if (coreChanged) notes.push('🔁 *Cambiaron archivos del núcleo* (`index.js` / `handler.js` / `lib/`): hay que reiniciar el bot para que apliquen.')
       else if (onlyPlugins) notes.push('♻️ Solo cambiaron plugins en `cmds/`: se recargan solos, sin reiniciar.')
@@ -235,7 +389,8 @@ export default {
 
       const doneText = `${HEADING}\n\n*[ ✅ ] ${opts.force ? 'Actualización forzada aplicada.' : 'Actualización aplicada correctamente.'}*\n\n` +
         `*Rama:* \`${branch}\` · \`${oldHead.slice(0, 7)}\` → \`${newHead.slice(0, 7)}\`${commitsText}` +
-        (notes.length ? `\n\n${notes.join('\n')}` : '')
+        (notes.length ? `\n\n${notes.join('\n')}` : '') +
+        reorgNote(reorg)
 
       await finishReply(context, progress, doneText)
 

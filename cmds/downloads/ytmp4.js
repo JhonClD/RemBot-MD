@@ -1,14 +1,32 @@
 // ytmp4.js — Descargar el video (MP4) de un video de YouTube.
-// Autor: Jhon 𝗖𝗜𝗗. Búsqueda con yt-search y descarga con la API pública
-// Delirius (sin key). Requiere la dependencia nueva: yt-search.
-// ADVERTENCIA: al probar el 2026-11-25, el endpoint de Delirius devolvía
-// HTTP 410. Si el comando falla, es la API, no el comando: reintenta más
-// tarde. Videos de más de 50 MB se mandan como documento.
+// Autor: Jhon 𝗖𝗜𝗗. Sin APIs de terceros: busca con yt-search (scraping)
+// y descarga con yt-dlp (scrapea YouTube directo, sin API key).
+// yt-dlp es un binario que se descarga solo a bot/lib/yt-dlp la primera
+// vez (desde GitHub, versión fijada + fallback a latest) y se reutiliza.
+// Fallbacks de descarga: 1) yt-dlp 360p, 2) yt-dlp con cliente Android,
+// 3) yt-dlp 480p. Videos de más de 50 MB se mandan como documento;
+// más de 100 MB no se mandan (límite del comando).
+// Requiere: yt-search, play-dl (solo como info de respaldo), ffmpeg
+// en el servidor para unir video+audio (ya lo usa el bot).
 
 import yts from 'yt-search'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const DELIRIUS_URL = 'https://api.delirius.online'
-const MAX_VIDEO_SIZE = 50 * 1024 * 1024 // 50 MB
+const execFileAsync = promisify(execFile)
+
+const YTDLP_VERSION = '2026.11.23'
+const YTDLP_URLS = [
+  `https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp`,
+  'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp',
+]
+const YTDLP_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'lib', 'yt-dlp')
+const MAX_VIDEO_SIZE = 50 * 1024 * 1024 // 50 MB: por encima, documento
+const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB: límite del comando
 
 const isYTUrl = url =>
   /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/i.test(url || '')
@@ -21,64 +39,90 @@ function getVideoId(text = '') {
   )?.[1] || null
 }
 
-async function getYoutubeUrl(input) {
+async function getVideoMeta(input) {
   const id = getVideoId(input)
-  if (id) return `https://youtu.be/${id}`
-  if (isYTUrl(input)) return input
+  if (id) {
+    try {
+      const info = await yts({ videoId: id })
+      if (info?.videoId) return { url: `https://youtu.be/${info.videoId}`, title: info.title, channel: info.author?.name || info.author, duration: info.timestamp, views: info.views, thumbnail: info.thumbnail || info.image }
+    } catch {}
+  }
   const search = await yts(input)
   const video = search.videos?.[0] || search.all?.find(v => v.type === 'video')
   if (!video?.url) throw new Error('No encontré un video válido de YouTube para eso.')
-  return video.url
+  return { url: video.url, title: video.title, channel: video.author?.name || video.author, duration: video.timestamp, views: video.views, thumbnail: video.thumbnail || video.image }
 }
 
-// La respuesta de Delirius varía; se aceptan varias formas de los datos.
-function extractVideo(json) {
-  const d = json?.data || json?.result || json
-  const dl = d?.download || {}
-  const url = dl.url || d?.url || d?.dl || null
-  if (!url || typeof url !== 'string') return null
-  return {
-    url,
-    title: d?.title || 'video',
-    channel: d?.author?.name || d?.channel || d?.author || 'Desconocido',
-    duration: d?.duration || d?.timestamp || 'Desconocida',
-    views: d?.views || 0,
-    quality: dl.quality || d?.quality || '360p',
-    size: dl.size || d?.size || null,
-    thumbnail: d?.thumbnail || d?.image || null,
-  }
-}
-
-async function getDeliriusVideo(url) {
-  const res = await fetch(`${DELIRIUS_URL}/download/ytmp4?url=${encodeURIComponent(url)}`, {
-    headers: { accept: 'application/json', 'user-agent': 'Mozilla/5.0' },
-  })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`La API de descarga respondió HTTP ${res.status}.`)
-  let data
+// Descarga el binario de yt-dlp si no está (o no ejecuta).
+async function ensureYtDlp() {
   try {
-    data = JSON.parse(text)
-  } catch {
-    throw new Error('La API devolvió una respuesta inválida.')
+    await fs.access(YTDLP_PATH, fs.constants.X_OK)
+    await execFileAsync(YTDLP_PATH, ['--version'], { timeout: 15000 })
+    return YTDLP_PATH
+  } catch {}
+  let lastError = null
+  for (const url of YTDLP_URLS) {
+    try {
+      const res = await fetch(url, { redirect: 'follow' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const buffer = Buffer.from(await res.arrayBuffer())
+      if (buffer.length < 1_000_000 || !buffer.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) {
+        throw new Error('El archivo descargado no es un binario válido.')
+      }
+      await fs.mkdir(path.dirname(YTDLP_PATH), { recursive: true })
+      await fs.writeFile(YTDLP_PATH, buffer, { mode: 0o755 })
+      await execFileAsync(YTDLP_PATH, ['--version'], { timeout: 15000 })
+      return YTDLP_PATH
+    } catch (error) {
+      lastError = error
+    }
   }
-  if (data?.status === false) throw new Error(data?.msg || 'La API no devolvió el video.')
-  const video = extractVideo(data)
-  if (!video?.url) throw new Error('La API no devolvió la URL de descarga.')
-  return video
+  throw new Error(`No pude preparar yt-dlp: ${lastError?.message || 'descarga fallida'}.`)
 }
 
-async function getRemoteFileSize(url) {
-  const head = await fetch(url, { method: 'HEAD', headers: { 'user-agent': 'Mozilla/5.0' } }).catch(() => null)
-  let bytes = Number(head?.headers?.get('content-length'))
-  if (Number.isFinite(bytes) && bytes > 0) return bytes
-  const range = await fetch(url, { method: 'GET', headers: { range: 'bytes=0-0', 'user-agent': 'Mozilla/5.0' } }).catch(() => null)
-  const match = range?.headers?.get('content-range')?.match(/\/(\d+)$/)
-  if (match?.[1]) {
-    bytes = Number(match[1])
-    if (Number.isFinite(bytes) && bytes > 0) return bytes
+async function downloadWithYtDlp(ytdlp, url, tmpDir, format, extraArgs = []) {
+  const outTemplate = path.join(tmpDir, 'video.%(ext)s')
+  await execFileAsync(ytdlp, [
+    '-f', format,
+    '--merge-output-format', 'mp4',
+    '--js-runtimes', 'node',
+    '--no-playlist', '--no-warnings',
+    ...extraArgs,
+    '-o', outTemplate,
+    url,
+  ], { timeout: 300000, maxBuffer: 10 * 1024 * 1024 })
+  const files = (await fs.readdir(tmpDir)).filter(f => f.startsWith('video.'))
+  const file = files.find(f => f.endsWith('.mp4')) || files[0]
+  if (!file) throw new Error('yt-dlp terminó sin dejar el video.')
+  const filePath = path.join(tmpDir, file)
+  const stat = await fs.stat(filePath)
+  if (stat.size === 0) throw new Error('yt-dlp dejó el video vacío.')
+  if (stat.size > MAX_FILE_SIZE) throw new Error(`El video pesa ${(stat.size / 1024 / 1024).toFixed(1)} MB, más del límite de 100 MB.`)
+  return { filePath, size: stat.size }
+}
+
+async function getVideo(url) {
+  const errors = []
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rembot-play2-'))
+  try {
+    const ytdlp = await ensureYtDlp()
+    const attempts = [
+      ['bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360][ext=mp4]/b[height<=360]', []],
+      ['bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360][ext=mp4]/b[height<=360]', ['--extractor-args', 'youtube:player_client=android,web']],
+      ['bv*[height<=480]+ba/b[height<=480]', []],
+    ]
+    for (const [format, extra] of attempts) {
+      try {
+        return await downloadWithYtDlp(ytdlp, url, tmpDir, format, extra)
+      } catch (error) {
+        errors.push(`${format.slice(0, 20)}…: ${error.message}`)
+      }
+    }
+    throw new Error(`No pude descargar el video (${errors.join(' | ')}).`)
+  } catch (error) {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+    throw error
   }
-  bytes = Number(range?.headers?.get('content-length'))
-  return Number.isFinite(bytes) && bytes > 0 ? bytes : null
 }
 
 async function getThumbnail(url) {
@@ -95,20 +139,6 @@ function sanitizeFileName(name = 'video') {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 120) || 'video'
-}
-
-function parseFileSize(size) {
-  if (!size) return null
-  const raw = String(size).trim()
-  const match = raw.match(/([\d.,]+)\s*(bytes?|b|kb|kib|mb|mib|gb|gib)/i)
-  if (!match) return null
-  let valueText = match[1]
-  if (valueText.includes(',') && valueText.includes('.')) valueText = valueText.replace(/,/g, '')
-  else valueText = valueText.replace(',', '.')
-  const value = Number(valueText)
-  if (!Number.isFinite(value) || value <= 0) return null
-  const mult = { b: 1, byte: 1, bytes: 1, kb: 1024, kib: 1024, mb: 1024 ** 2, mib: 1024 ** 2, gb: 1024 ** 3, gib: 1024 ** 3 }
-  return Math.round(value * (mult[match[2].toLowerCase()] || 1))
 }
 
 function formatBytes(bytes = 0) {
@@ -129,39 +159,44 @@ export default {
       return msg.reply(`Escribe el nombre del video o pega su enlace.\nEjemplo: *${usedPrefix}play2 despacito*`)
     }
     const input = args.join(' ').trim()
+    let tmpDir = null
     try {
-      const url = await getYoutubeUrl(input)
-      const data = await getDeliriusVideo(url)
-      const title = data.title || 'video'
+      const meta = await getVideoMeta(input)
+      const url = meta.url
+      const title = meta.title || 'video'
       const fileName = `${sanitizeFileName(title)}.mp4`
-      const sizeBytes = parseFileSize(data.size) || await getRemoteFileSize(data.url).catch(() => null)
-      const sizeText = sizeBytes ? formatBytes(sizeBytes) : data.size || 'Desconocido'
-      const sendAsDocument = sizeBytes ? sizeBytes > MAX_VIDEO_SIZE : false
-      const infoMessage = `*Descargando video:* ${title}\n\n*Canal:* ${data.channel}\n*Duración:* ${data.duration}\n*Vistas:* ${Number(data.views || 0).toLocaleString('es-PE')}\n*Calidad:* ${data.quality}\n*Tamaño:* ${sizeText}\n*Enlace:* ${url}`
-      if (data.thumbnail) {
-        await sock.sendMessage(msg.chat, { image: { url: data.thumbnail }, caption: infoMessage }, { quoted: msg })
+      const infoMessage = `*Descargando video:* ${title}\n\n*Canal:* ${meta.channel || 'Desconocido'}\n*Duración:* ${meta.duration || 'Desconocida'}\n*Vistas:* ${Number(meta.views || 0).toLocaleString('es-PE')}\n*Calidad:* 360p\n*Enlace:* ${url}`
+      if (meta.thumbnail) {
+        await sock.sendMessage(msg.chat, { image: { url: meta.thumbnail }, caption: infoMessage }, { quoted: msg })
       } else {
         await msg.reply(infoMessage)
       }
-      const caption = `*Video descargado*\n\n*Calidad:* ${data.quality}\n*Tamaño:* ${sizeText}`
+      const { filePath, size } = await getVideo(url)
+      tmpDir = path.dirname(filePath)
+      const sizeText = formatBytes(size)
+      const sendAsDocument = size > MAX_VIDEO_SIZE
+      const caption = `*Video descargado*\n\n*Calidad:* 360p\n*Tamaño:* ${sizeText}`
+      const buffer = await fs.readFile(filePath)
       if (sendAsDocument) {
-        await sock.sendMessage(msg.chat, { document: { url: data.url }, mimetype: 'video/mp4', fileName, caption }, { quoted: msg })
-        return
-      }
-      try {
-        await sock.sendMessage(msg.chat, {
-          video: { url: data.url },
-          mimetype: 'video/mp4',
-          fileName,
-          caption,
-          ...(data.thumbnail ? { jpegThumbnail: await getThumbnail(data.thumbnail).catch(() => null) } : {}),
-        }, { quoted: msg })
-      } catch {
-        await sock.sendMessage(msg.chat, { document: { url: data.url }, mimetype: 'video/mp4', fileName, caption }, { quoted: msg })
+        await sock.sendMessage(msg.chat, { document: buffer, mimetype: 'video/mp4', fileName, caption }, { quoted: msg })
+      } else {
+        try {
+          await sock.sendMessage(msg.chat, {
+            video: buffer,
+            mimetype: 'video/mp4',
+            fileName,
+            caption,
+            ...(meta.thumbnail ? { jpegThumbnail: await getThumbnail(meta.thumbnail).catch(() => null) } : {}),
+          }, { quoted: msg })
+        } catch {
+          await sock.sendMessage(msg.chat, { document: buffer, mimetype: 'video/mp4', fileName, caption }, { quoted: msg })
+        }
       }
     } catch (error) {
       console.error('[play2] error:', error?.stack || error)
       await msg.reply(error?.message || 'No pude descargar el video. Inténtalo más tarde.')
+    } finally {
+      if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
     }
   },
 }

@@ -11,3 +11,4 @@ database.json
 *.sqlite
 lib/system/tmp/*
 lib/system/botstore.json
+lib/yt-dlp

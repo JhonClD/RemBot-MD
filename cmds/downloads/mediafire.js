@@ -1,13 +1,18 @@
 // mediafire.js — Descargar un archivo de MediaFire.
-// Autor: Jhon 𝗖𝗜𝗗. Extrae el enlace directo de la página (axios + cheerio,
-// ya en las dependencias de RemBot). Sin mime-types: el tipo se resuelve con
-// una tabla local extensión → MIME.
+// Autor: Jhon 𝗖𝗜𝗗. Extrae el enlace directo de la página (scraping,
+// sin API). Varios fallbacks porque MediaFire a veces no responde desde
+// el servidor: 1) axios + cheerio (#downloadButton), 2) fetch + regex
+// del enlace download*.mediafire.com en el HTML, 3) reintento con otro
+// User-Agent. Si la página es un reto anti-bot o el archivo se eliminó,
+// lo dice claro en vez de quedarse callado.
+// Sin mime-types: el tipo se resuelve con una tabla local extensión → MIME.
 
 import axios from 'axios'
 import path from 'node:path'
-import cheerio from 'cheerio'
+import * as cheerio from 'cheerio'
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+const UA_CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+const UA_FIREFOX = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'
 
 const EXT_MIME = {
   '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.webm': 'video/webm',
@@ -62,27 +67,100 @@ function pickDetails($) {
   return { size, uploaded }
 }
 
-async function mediafireDl(url, timeout = 45000) {
-  const mediafireUrl = cleanText(url)
-  if (!mediafireUrl) throw new Error('Falta la URL.')
-  const res = await axios.get(mediafireUrl, {
-    timeout,
-    maxRedirects: 5,
-    headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9', Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
-    validateStatus: () => true,
-  })
-  if (res.status < 200 || res.status >= 400) {
-    throw new Error(`MediaFire respondió HTTP ${res.status}.`)
+function detectPageProblem(html, status) {
+  const text = String(html || '')
+  if (status === 404) return 'Ese enlace no existe o el archivo fue eliminado de MediaFire.'
+  if (/File Removed for Violation|This file has been removed|archivo ha sido eliminado/i.test(text)) {
+    return 'Ese archivo fue eliminado de MediaFire.'
   }
-  const $ = cheerio.load(String(res.data || ''))
+  if (/cf-challenge|Just a moment|Attention Required|are you a robot|Verifying you are human/i.test(text)) {
+    return 'MediaFire puso un reto anti-bot y no dejó leer la página desde el servidor. Reintenta en unos minutos.'
+  }
+  return null
+}
+
+// Busca el enlace directo en el HTML sin depender del botón.
+function findDownloadInHtml(html) {
+  const matches = String(html || '').match(/https:\/\/download\d+\.mediafire\.com\/[^"'\\\s<>]+/gi)
+  if (matches?.length) return normalizeUrl(matches[0])
+  const quoted = String(html || '').match(/"(https?:\/\/download[^"]*\.mediafire\.com[^"]*)"/i)
+  if (quoted?.[1]) return normalizeUrl(quoted[1])
+  return null
+}
+
+function parsePage(html) {
+  const $ = cheerio.load(String(html || ''))
   const downloadLink = normalizeUrl($('#downloadButton').attr('href') || $('a#downloadButton').attr('href') || null)
-  if (!downloadLink) throw new Error('No encontré el botón de descarga en esa página.')
+    || normalizeUrl($('a[href*="download"][href*="mediafire.com"]').first().attr('href') || null)
+    || findDownloadInHtml(html)
   const filename = pickFilename($)
   const filetype = cleanText($('.filetype').text()) || null
   const { size, uploaded } = pickDetails($)
-  const type = filename?.match(/\.([a-z0-9]{1,10})$/i)?.[1]?.toLowerCase()
-    || (filetype ? cleanText(filetype).toLowerCase() : null)
-  return { downloadLink, filename, filetype, size, uploaded, type }
+  return { downloadLink, filename, filetype, size, uploaded }
+}
+
+async function mediafireDl(url, timeout = 45000) {
+  const mediafireUrl = cleanText(url)
+  if (!mediafireUrl) throw new Error('Falta la URL.')
+  const errors = []
+
+  // Intento 1: axios + cheerio (botón de descarga).
+  try {
+    const res = await axios.get(mediafireUrl, {
+      timeout,
+      maxRedirects: 5,
+      headers: { 'User-Agent': UA_CHROME, 'Accept-Language': 'en-US,en;q=0.9', Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      validateStatus: () => true,
+    })
+    const problem = detectPageProblem(res.data, res.status)
+    if (problem) throw new Error(problem)
+    if (res.status < 200 || res.status >= 400) throw new Error(`MediaFire respondió HTTP ${res.status}.`)
+    const parsed = parsePage(String(res.data || ''))
+    if (parsed.downloadLink) return parsed
+    errors.push('el botón de descarga no apareció en la página')
+  } catch (error) {
+    errors.push(`axios: ${error.message}`)
+    if (/eliminado|anti-bot|no existe/i.test(error.message)) throw error
+  }
+
+  // Intento 2: fetch con otro User-Agent + regex del enlace directo.
+  try {
+    const res = await fetch(mediafireUrl, {
+      headers: { 'User-Agent': UA_FIREFOX, 'Accept-Language': 'en-US,en;q=0.9', Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeout),
+    })
+    const html = await res.text()
+    const problem = detectPageProblem(html, res.status)
+    if (problem) throw new Error(problem)
+    if (!res.ok) throw new Error(`MediaFire respondió HTTP ${res.status}.`)
+    const parsed = parsePage(html)
+    if (parsed.downloadLink) return parsed
+    errors.push('fetch: la página no trae enlace directo')
+  } catch (error) {
+    errors.push(`fetch: ${error.message}`)
+    if (/eliminado|anti-bot|no existe/i.test(error.message)) throw error
+  }
+
+  // Intento 3: reintento del primero (bloqueos transitorios del servidor).
+  try {
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    const res = await axios.get(mediafireUrl, {
+      timeout,
+      maxRedirects: 5,
+      headers: { 'User-Agent': UA_FIREFOX, 'Accept-Language': 'en-US,en;q=0.9', Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      validateStatus: () => true,
+    })
+    if (res.status >= 200 && res.status < 400) {
+      const parsed = parsePage(String(res.data || ''))
+      if (parsed.downloadLink) return parsed
+    }
+    errors.push('reintento: sin enlace directo')
+  } catch (error) {
+    errors.push(`reintento: ${error.message}`)
+  }
+
+  throw new Error(`MediaFire no respondió con el enlace (${errors.join(' | ')}). Puede que el servidor esté bloqueado por MediaFire: reintenta más tarde.`)
 }
 
 export default {

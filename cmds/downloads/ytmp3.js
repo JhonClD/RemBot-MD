@@ -89,18 +89,70 @@ async function getVideoInfo(input, videoId) {
         return { ...info, url: `https://youtu.be/${info.videoId}`, image: info.thumbnail || info.image }
       }
     } catch {}
+    // Si la búsqueda no trae el título, se lee con yt-dlp.
+    const dl = await fetchYtDlpInfo(`https://youtu.be/${videoId}`)
+    if (dl) return dl
     // Con enlace directo no hace falta la búsqueda: se descarga con la URL.
     return { videoId, url: `https://youtu.be/${videoId}` }
   }
-  const search = await withTimeout(yts(input), 25000, 'YouTube no responde a la búsqueda desde el servidor.')
-  return search.videos?.[0] || search.all?.find(v => v.type === 'video') || null
+  // Búsqueda por nombre: primero yt-search (rápido) y si no encuentra
+  // nada (YouTube bloquea el scraping desde el servidor), yt-dlp.
+  try {
+    const search = await withTimeout(yts(input), 12000, 'YouTube no responde a la búsqueda desde el servidor.')
+    const video = search.videos?.[0] || search.all?.find(v => v.type === 'video')
+    if (video?.url || video?.videoId) return video
+  } catch {}
+  await logPlay('yt-search sin resultados, probando yt-dlp')
+  return await fetchYtDlpInfo(`ytsearch1:${input}`)
 }
+
+// Info del video con yt-dlp (innertube + cookies). Mucho más fiable
+// que el scraping de yt-search cuando YouTube bloquea la IP del
+// servidor. `target` es una URL o `ytsearch1:<búsqueda>`.
+async function fetchYtDlpInfo(target) {
+  try {
+    const ytdlp = await ensureYtDlp()
+    const cookies = await cookieArgs()
+    const { stdout } = await execFileAsync(ytdlp, [
+      '--dump-json', '--skip-download', '--no-playlist', '--no-warnings',
+      '--js-runtimes', 'node',
+      ...cookies,
+      target,
+    ], { timeout: 30000, maxBuffer: 5 * 1024 * 1024 })
+    const data = JSON.parse(String(stdout).trim().split('\n')[0])
+    if (!data?.id) return null
+    const durationSec = Number(data.duration)
+    const views = Number(data.view_count)
+    const ts = Number(data.timestamp)
+    return {
+      videoId: data.id,
+      url: `https://youtu.be/${data.id}`,
+      title: data.title || null,
+      author: data.uploader || data.channel || null,
+      timestamp: Number.isFinite(durationSec) ? formatDuration(durationSec) : null,
+      views: Number.isFinite(views) ? views : null,
+      ago: Number.isFinite(ts) && ts > 0 ? relativeTimeEs(ts) : null,
+      thumbnail: data.thumbnail || null,
+      image: data.thumbnail || null,
+      stats: {
+        views: Number.isFinite(views) && views > 0 ? views : null,
+        timestamp: Number.isFinite(ts) && ts > 0 ? ts : null,
+      },
+    }
+  } catch { return null }
+}
+
+// yt-dlp verificado una vez por proceso: no hace falta volver a
+// ejecutar `--version` (tarda ~1s) en cada intento de descarga.
+let ytdlpVerifiedPath = null
 
 // Descarga el binario de yt-dlp si no está (o no ejecuta).
 async function ensureYtDlp() {
+  if (ytdlpVerifiedPath) return ytdlpVerifiedPath
   try {
     await fs.access(YTDLP_PATH, fs.constants.X_OK)
     await execFileAsync(YTDLP_PATH, ['--version'], { timeout: 15000 })
+    ytdlpVerifiedPath = YTDLP_PATH
     return YTDLP_PATH
   } catch {}
   let lastError = null
@@ -115,6 +167,7 @@ async function ensureYtDlp() {
       await fs.mkdir(path.dirname(YTDLP_PATH), { recursive: true })
       await fs.writeFile(YTDLP_PATH, buffer, { mode: 0o755 })
       await execFileAsync(YTDLP_PATH, ['--version'], { timeout: 15000 })
+      ytdlpVerifiedPath = YTDLP_PATH
       return YTDLP_PATH
     } catch (error) {
       lastError = error
@@ -123,11 +176,38 @@ async function ensureYtDlp() {
   throw new Error(`No pude preparar yt-dlp: ${lastError?.message || 'descarga fallida'}.`)
 }
 
+// Vistas y fecha de subida exactas con yt-dlp. yt-search a veces no
+// trae las vistas ni la fecha, así que se leen de aquí. Corre en
+// paralelo con la descarga para no hacerla más lenta; si falla, se
+// usan los datos de la búsqueda.
+async function getVideoStats(url) {
+  try {
+    const ytdlp = await ensureYtDlp()
+    const cookies = await cookieArgs()
+    const { stdout } = await execFileAsync(ytdlp, [
+      '--print', '%(view_count)s|%(timestamp)s',
+      '--skip-download', '--no-playlist', '--no-warnings',
+      '--js-runtimes', 'node',
+      ...cookies,
+      url,
+    ], { timeout: 15000, maxBuffer: 1024 * 1024 })
+    const [views, timestamp] = String(stdout).trim().split('\n')[0].split('|')
+    const v = Number(views)
+    const t = Number(timestamp)
+    return {
+      views: Number.isFinite(v) && v > 0 ? v : null,
+      timestamp: Number.isFinite(t) && t > 0 ? t : null,
+    }
+  } catch { return { views: null, timestamp: null } }
+}
+
 async function downloadWithYtDlp(ytdlp, url, tmpDir, extraArgs = [], meta = {}) {
   const outTemplate = path.join(tmpDir, 'audio.%(ext)s')
   const cookies = await cookieArgs()
   await execFileAsync(ytdlp, [
-    '-f', 'bestaudio[ext=m4a]/bestaudio',
+    // m4a de hasta 128 kbps (el audio estándar de YouTube): pesa la mitad
+    // que el de 256 kbps y suena igual en el teléfono, así baja más rápido.
+    '-f', 'bestaudio[ext=m4a][abr<=128]/bestaudio[ext=m4a]/bestaudio',
     '--js-runtimes', 'node',
     '--no-playlist', '--no-warnings',
     ...cookies,
@@ -145,13 +225,14 @@ async function downloadWithYtDlp(ytdlp, url, tmpDir, extraArgs = [], meta = {}) 
   const ext = path.extname(file).slice(1).toLowerCase()
   // El archivo lleva su nombre y su portada incrustados (solo m4a y con
   // miniatura). Si no se puede, se manda el audio tal cual.
-  if (ext === 'm4a' && meta.thumbBuffer && meta.title) {
-    const tagged = await embedMetadata(filePath, meta.title, meta.channel || 'YouTube', meta.thumbBuffer, tmpDir)
+  if (ext === 'm4a' && meta.thumbPromise && meta.title) {
+    const thumbBuffer = await meta.thumbPromise
+    const tagged = thumbBuffer ? await embedMetadata(filePath, meta.title, meta.channel || 'YouTube', thumbBuffer, tmpDir) : null
     if (tagged) {
       await logPlay('metadatos incrustados (título + portada)')
       filePath = tagged
     } else {
-      await logPlay('metadatos no incrustados (sin ffmpeg o falló)')
+      await logPlay('metadatos no incrustados (sin ffmpeg o sin miniatura)')
     }
   }
   const buffer = await fs.readFile(filePath)
@@ -206,6 +287,54 @@ async function embedMetadata(filePath, title, channel, thumbBuffer, tmpDir) {
   return null
 }
 
+// Vistas en corto: 2100000 → "2.1M", 1500 → "1.5K".
+function formatViewsCompact(views) {
+  const n = Number(views || 0)
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K`
+  return String(n)
+}
+
+// Fecha relativa en español, solo la unidad mayor:
+// "Hace 23 horas", "Hace 2 días", "Hace 7 meses", "Hace 1 año".
+function relativeTimeEs(epochSeconds) {
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - Number(epochSeconds))
+  const minute = 60, hour = 3600, day = 86400, month = 30 * day, year = 365 * day
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`
+  if (diff < minute) return 'Hace unos segundos'
+  if (diff < hour) return `Hace ${plural(Math.floor(diff / minute), 'minuto', 'minutos')}`
+  if (diff < day) return `Hace ${plural(Math.floor(diff / hour), 'hora', 'horas')}`
+  if (diff < month) return `Hace ${plural(Math.floor(diff / day), 'día', 'días')}`
+  if (diff < year) return `Hace ${plural(Math.floor(diff / month), 'mes', 'meses')}`
+  return `Hace ${plural(Math.floor(diff / year), 'año', 'años')}`
+}
+
+// "7 months ago" (lo que da yt-search) → "Hace 7 meses".
+// También acepta "Streamed 7 months ago" o "Premiered 2 weeks ago".
+function agoToEs(ago) {
+  const m = String(ago || '').match(/(\d+)\s+(second|minute|hour|day|week|month|year)s?/i)
+  if (!m) return ago || null
+  const n = Number(m[1])
+  const unit = { second: ['segundo', 'segundos'], minute: ['minuto', 'minutos'], hour: ['hora', 'horas'], day: ['día', 'días'], week: ['semana', 'semanas'], month: ['mes', 'meses'], year: ['año', 'años'] }[m[2].toLowerCase()]
+  return `Hace ${n} ${n === 1 ? unit[0] : unit[1]}`
+}
+
+// Segundos → "1:31", "1:02:03".
+function formatDuration(seconds) {
+  const s = Math.floor(Number(seconds) || 0)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`
+}
+
+// "1:31" → 91, "1:02:03" → 3723. Sirve para estimar el tamaño del audio.
+function parseDurationSeconds(timestamp) {
+  const parts = String(timestamp || '').split(':').map(Number)
+  if (!parts.length || parts.some(Number.isNaN)) return null
+  return parts.reduce((acc, p) => acc * 60 + p, 0)
+}
+
 function sanitizeFileName(name = 'audio') {
   return String(name)
     .replace(/\.(mp3|m4a|webm|opus|ogg)$/i, '')
@@ -215,15 +344,17 @@ function sanitizeFileName(name = 'audio') {
     .slice(0, 120) || 'audio'
 }
 
-async function getAudio(url, title, channel, thumbBuffer) {
+async function getAudio(url, title, channel, thumbPromise) {
   const errors = []
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rembot-play-'))
-  const meta = { title, channel, thumbBuffer }
+  const meta = { title, channel, thumbPromise }
   await logPlay('getAudio inicio:', url)
   try {
     // Intentos yt-dlp (normal, Android, iOS, TV embebido). YouTube bloquea
     // la IP del servidor ("Sign in to confirm you're not a bot") y cada
     // cliente usa un endpoint distinto; iOS y TV a veces pasan donde web no.
+    // OJO: iOS y Android fallan en este host (2026-11-26), así que web va
+    // primero; si web falla, se prueban los demás.
     try {
       const ytdlp = await ensureYtDlp()
       const audio = await downloadWithYtDlp(ytdlp, url, tmpDir, [], meta)
@@ -295,10 +426,11 @@ export default {
   description: 'Descarga el audio de un video de YouTube. Uso: `play <nombre o enlace>.',
   run: async ({ msg, sock, args, usedPrefix }) => {
     if (!args?.[0]) {
-      return msg.reply(`Escribe el nombre de la canción o pega el enlace del video.\nEjemplo: *${usedPrefix}play despacito*`)
+      return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗔𝗨𝗗𝗜𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}play <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}play despacito_`)
     }
     const input = args.join(' ').trim()
     await logPlay('play inicio:', input)
+    await msg.react?.('⏳').catch(() => {})
     try {
       const videoId = getVideoId(input)
       const query = videoId ? `https://youtu.be/${videoId}` : input
@@ -306,32 +438,56 @@ export default {
       let title = 'audio'
       let thumbnail = null
       let channel = 'YouTube'
-      let thumb = null
+      // La miniatura se baja en segundo plano y la tarjeta se manda en
+      // paralelo con la descarga: antes la tarjeta frenaba el inicio de
+      // la descarga ~2s y el audio llegaba más tarde.
+      let thumbPromise = Promise.resolve(null)
+      let cardPromise = Promise.resolve()
       try {
         const info = await getVideoInfo(query, videoId)
-        await logPlay('info:', info?.title ? `título="${String(info.title).slice(0, 80)}"` : (info?.url ? 'solo URL, sin título' : 'sin resultado'))
+        await logPlay('info:', info?.title ? `título="${String(info.title).slice(0, 80)}"` : (info?.url ? 'solo URL, sin título' : 'sin resultado'), 'vistas=', info?.views, 'ago=', info?.ago)
         if (info?.title) {
           url = info.url || `https://youtu.be/${info.videoId}`
           title = info.title || title
           thumbnail = info.image || info.thumbnail || null
           channel = info.author?.name || info.author || 'YouTube'
-          thumb = thumbnail ? await getThumbnail(thumbnail) : null
-          const infoMessage = `*Descargando audio:* ${title}\n\n*Canal:* ${info.author?.name || info.author || 'Desconocido'}\n*Duración:* ${info.timestamp || 'Desconocida'}\n*Vistas:* ${Number(info.views || 0).toLocaleString('es-PE')}\n*Publicado:* ${info.ago || 'Desconocido'}\n*Enlace:* ${url}`
-          try {
-            if (thumb) {
-              await withTimeout(sock.sendMessage(msg.chat, { image: thumb, caption: infoMessage }, { quoted: msg }), 20000, 'La tarjeta de info no se pudo enviar.')
-              await logPlay('tarjeta enviada (buffer)')
-            } else if (thumbnail) {
-              await withTimeout(sock.sendMessage(msg.chat, { image: { url: thumbnail }, caption: infoMessage }, { quoted: msg }), 20000, 'La tarjeta de info no se pudo enviar.')
-              await logPlay('tarjeta enviada (URL)')
-            } else {
-              await withTimeout(msg.reply(infoMessage), 20000, 'El mensaje de info no se pudo enviar.')
-              await logPlay('info enviada (texto)')
+          thumbPromise = thumbnail ? getThumbnail(thumbnail) : Promise.resolve(null)
+          // Tamaño estimado del audio (128 kbps × duración): el tamaño
+          // exacto solo se conoce al bajarlo, pero el estimado queda a
+          // un par de % del real porque el bitrate está limitado a 128.
+          const durationSec = parseDurationSeconds(info.timestamp)
+          const sizeMB = durationSec ? (128 * durationSec / 8 / 1024).toFixed(2) : null
+          // Vistas y fecha exactas con yt-dlp (en paralelo con la
+          // descarga): yt-search a veces no las trae y salían fijas.
+          // Si la búsqueda ya vino de yt-dlp, se reusan sus datos.
+          const statsPromise = info.stats
+            ? Promise.resolve(info.stats)
+            : getVideoStats(url).catch(() => ({ views: null, timestamp: null }))
+          cardPromise = (async () => {
+            try {
+              const [thumb, stats] = await Promise.all([
+                thumbPromise,
+                withTimeout(statsPromise, 10000, 'stats').catch(() => ({ views: null, timestamp: null })),
+              ])
+              await logPlay('stats:', stats.views, stats.timestamp)
+              const views = stats.views ?? info.views
+              const lanzamiento = stats.timestamp ? relativeTimeEs(stats.timestamp) : agoToEs(info.ago)
+              const infoMessage = `*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗔𝗨𝗗𝗜𝗢*\n> ❀ ᴛíᴛᴜʟᴏ » *${title}*\n> ✐ ᴄᴀɴᴀʟ » *${info.author?.name || info.author || 'Desconocido'}*\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${info.timestamp || 'Desconocida'}* │ ✧ *${views != null ? formatViewsCompact(views) : 'Desconocido'}* vistas\n> ✰ ᴄᴀʟɪᴅᴀᴅ » *128 kbps* │ ❒ *${sizeMB ? `${sizeMB} MB` : 'Desconocido'}*\n> ⊞ ʟᴀɴᴢᴀᴍɪᴇɴᴛᴏ » *${lanzamiento || 'Desconocido'}*\n> 🜸 ʟɪɴᴋ » _${url}_`
+              if (thumb) {
+                await withTimeout(sock.sendMessage(msg.chat, { image: thumb, caption: infoMessage }, { quoted: msg }), 20000, 'La tarjeta de info no se pudo enviar.')
+                await logPlay('tarjeta enviada (buffer)')
+              } else if (thumbnail) {
+                await withTimeout(sock.sendMessage(msg.chat, { image: { url: thumbnail }, caption: infoMessage }, { quoted: msg }), 20000, 'La tarjeta de info no se pudo enviar.')
+                await logPlay('tarjeta enviada (URL)')
+              } else {
+                await withTimeout(msg.reply(infoMessage), 20000, 'El mensaje de info no se pudo enviar.')
+                await logPlay('info enviada (texto)')
+              }
+            } catch (error) {
+              await logPlay('tarjeta falló:', String(error?.message || error).slice(0, 200))
+              console.error('[play] no pude mandar la tarjeta:', error?.message || error)
             }
-          } catch (error) {
-            await logPlay('tarjeta falló:', String(error?.message || error).slice(0, 200))
-            console.error('[play] no pude mandar la tarjeta:', error?.message || error)
-          }
+          })()
         } else if (info?.url) {
           url = info.url
         }
@@ -339,16 +495,21 @@ export default {
         await logPlay('info falló:', String(error?.message || error).slice(0, 200))
         console.error('[play] no pude obtener la info del video:', error?.message || error)
         if (!videoId) {
-          return msg.reply('No pude buscar en YouTube: no responde desde el servidor. Prueba pegando el enlace directo del video.')
+          await msg.react?.('❌').catch(() => {})
+          return msg.reply('*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗔𝗨𝗗𝗜𝗢*\n> ✖ ᴇʀʀᴏʀ » *No pude buscar en YouTube: no responde desde el servidor. Prueba pegando el enlace directo del video.*')
         }
         url = `https://youtu.be/${videoId}`
       }
       if (!isYTUrl(url)) {
-        return msg.reply('No encontré un video válido de YouTube para eso.')
+        await msg.react?.('❌').catch(() => {})
+        return msg.reply('*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗔𝗨𝗗𝗜𝗢*\n> ✖ ᴇʀʀᴏʀ » *No encontré un video válido de YouTube para eso.*')
       }
       // Límite total de 5 min para toda la descarga: el comando siempre
       // responde algo, aunque un intento se quede esperando.
-      const audio = await withTimeout(getAudio(url, title, channel, thumb), 300000, 'La descarga del audio tardó demasiado (5 min). Prueba con otro video o más tarde.')
+      const audio = await withTimeout(getAudio(url, title, channel, thumbPromise), 300000, 'La descarga del audio tardó demasiado (5 min). Prueba con otro video o más tarde.')
+      // La tarjeta (si la hay) ya debió llegar; se le esperan como mucho
+      // 2s para que el audio no le gane y aparezca antes que el aviso.
+      await Promise.race([cardPromise, new Promise(resolve => setTimeout(resolve, 2000))])
       await logPlay('audio listo, enviando:', audio.name)
       // El audio se manda pelado (sin tarjeta de enlace encima): la
       // tarjeta rompía cómo se ve el mensaje en WhatsApp. El nombre y
@@ -359,10 +520,12 @@ export default {
         mimetype: mimeFor(audio.ext),
       }, { quoted: msg })
       await logPlay('audio enviado OK')
+      await msg.react?.('✅').catch(() => {})
     } catch (error) {
       await logPlay('play error:', String(error?.message || error).slice(0, 300))
       console.error('[play] error:', error?.stack || error)
-      await msg.reply(error?.message || 'No pude descargar el audio. Inténtalo más tarde.')
+      await msg.react?.('❌').catch(() => {})
+      await msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗔𝗨𝗗𝗜𝗢*\n> ✖ ᴇʀʀᴏʀ » *${error?.message || 'No pude descargar el audio. Inténtalo más tarde.'}*`)
     }
   },
 }

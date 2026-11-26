@@ -87,15 +87,15 @@ export default {
   description: 'Descarga un reel o post de Instagram. Uso: `ig <enlace de Instagram>.',
   run: async ({ msg, sock, args, usedPrefix }) => {
     if (!args[0]) {
-      return msg.reply(`Pega un enlace de Instagram.\nEjemplo: *${usedPrefix}ig https://www.instagram.com/reel/ABC123/*`)
+      return msg.reply(`*「✦」 𝗜𝗡𝗦𝗧𝗔𝗚𝗥𝗔𝗠*\n> ✐ ᴜsᴏ » *${usedPrefix}ig <enlace de Instagram>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}ig https://www.instagram.com/reel/ABC123/_`)
     }
     if (!/instagram\.com\/(p|reel|share|tv|stories)\//.test(args[0])) {
-      return msg.reply('Ese enlace no parece de Instagram. Revisa que sea un reel o un post.')
+      return msg.reply('*「✦」 𝗜𝗡𝗦𝗧𝗔𝗚𝗥𝗔𝗠*\n> ✖ ᴇʀʀᴏʀ » *Ese enlace no parece de Instagram. Revisa que sea un reel o un post.*')
     }
     try {
       const data = await getInstagramMedia(args[0])
-      if (!data) return msg.reply('No pude obtener ese contenido. Puede ser privado o el enlace no tiene medio descargable.')
-      const caption = `*Instagram*\n\n${data.title ? `*Usuario:* ${data.title}\n` : ''}${data.caption ? `*Descripción:* ${data.caption}\n` : ''}${data.like ? `*Likes:* ${data.like}\n` : ''}${data.views ? `*Vistas:* ${data.views}\n` : ''}${data.duration ? `*Duración:* ${data.duration}\n` : ''}${data.format ? `*Formato:* ${data.format}\n` : ''}*Enlace:* ${args[0]}`
+      if (!data) return msg.reply('*「✦」 𝗜𝗡𝗦𝗧𝗔𝗚𝗥𝗔𝗠*\n> ✖ ᴇʀʀᴏʀ » *No pude obtener ese contenido. Puede ser privado o el enlace no tiene medio descargable.*')
+      const caption = `*「✦」 𝗜𝗡𝗦𝗧𝗔𝗚𝗥𝗔𝗠*${data.title ? `\n> ✐ ᴜsᴜᴀʀɪᴏ » *${data.title}*` : ''}${data.caption ? `\n> ❝ ᴅᴇsᴄʀɪᴘᴄɪóɴ » *${data.caption}*` : ''}${data.like ? `\n> ♥ ʟɪᴋᴇs » *${data.like}*` : ''}${data.views ? `\n> ✧ ᴠɪsᴛᴀs » *${data.views}*` : ''}${data.duration ? `\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${data.duration}*` : ''}${data.format ? `\n> ✰ ᴛɪᴘᴏ » *${data.format}*` : ''}\n> 🜸 ʟɪɴᴋ » _${args[0]}_`
       if (data.type === 'video') {
         await sock.sendMessage(msg.chat, { video: { url: data.url }, caption, mimetype: 'video/mp4', fileName: 'ig.mp4' }, { quoted: msg })
       } else if (data.type === 'image') {
@@ -105,7 +105,7 @@ export default {
       }
     } catch (error) {
       console.error('[instagram] error:', error?.stack || error)
-      await msg.reply('No pude descargar ese contenido de Instagram. Inténtalo más tarde.')
+      await msg.reply('*「✦」 𝗜𝗡𝗦𝗧𝗔𝗚𝗥𝗔𝗠*\n> ✖ ᴇʀʀᴏʀ » *No pude descargar ese contenido de Instagram. Inténtalo más tarde.*')
     }
   },
 }

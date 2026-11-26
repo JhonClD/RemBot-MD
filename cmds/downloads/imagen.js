@@ -68,30 +68,30 @@ export default {
   run: async ({ msg, sock, args, usedPrefix }) => {
     const text = args.join(' ').trim()
     if (!text) {
-      return msg.reply(`Escribe qué imagen quieres buscar.\nEjemplo: *${usedPrefix}imagen gatitos*`)
+      return msg.reply(`*「✦」 𝗜𝗠𝗔𝗚𝗘𝗡*\n> ✐ ᴜsᴏ » *${usedPrefix}imagen <búsqueda>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}imagen gatitos_`)
     }
     const lowerText = text.toLowerCase()
     if (BANNED_WORDS.some(word => lowerText.includes(word))) {
-      return msg.reply('Este comando no permite búsquedas de contenido +18 o NSFW.')
+      return msg.reply('*「✦」 𝗜𝗠𝗔𝗚𝗘𝗡*\n> ✖ ᴇʀʀᴏʀ » *Este comando no permite búsquedas de contenido +18 o NSFW.*')
     }
     try {
       const results = await getImageSearchResults(text)
       if (!results?.length) {
-        return msg.reply(`No encontré imágenes para *${text}*.`)
+        return msg.reply(`*「✦」 𝗜𝗠𝗔𝗚𝗘𝗡*\n> ✖ ᴇʀʀᴏʀ » *No encontré imágenes para ${text}.*`)
       }
       const validResults = await filterValidImages(results.slice(0, 15))
       if (validResults.length < 2) {
-        return msg.reply('No encontré suficientes imágenes válidas para mostrar el álbum.')
+        return msg.reply('*「✦」 𝗜𝗠𝗔𝗚𝗘𝗡*\n> ✖ ᴇʀʀᴏʀ » *No encontré suficientes imágenes válidas para mostrar el álbum.*')
       }
       const medias = validResults.slice(0, 10).map(r => ({
         type: 'image',
         data: { url: r.url },
-        caption: `*Búsqueda de imágenes*\n\n${r.title ? `*Título:* ${r.title}\n` : ''}${r.domain ? `*Fuente:* ${r.domain}\n` : ''}${r.resolution ? `*Resolución:* ${r.resolution}\n` : ''}*Búsqueda:* ${text}`,
+        caption: `*「✦」 𝗜𝗠𝗔𝗚𝗘𝗡*${r.title ? `\n> ❀ ᴛíᴛᴜʟᴏ » *${r.title}*` : ''}${r.domain ? `\n> ✐ ғᴜᴇɴᴛᴇ » *${r.domain}*` : ''}${r.resolution ? `\n> ✰ ʀᴇsᴏʟᴜᴄɪóɴ » *${r.resolution}*` : ''}\n> ❝ ᴛᴇxᴛᴏ » *${text}*`,
       }))
       await sendImages({ sock, chat: msg.chat, msg, medias })
     } catch (error) {
       console.error('[imagen] error:', error?.stack || error)
-      await msg.reply('No pude buscar imágenes ahora. Inténtalo más tarde.')
+      await msg.reply('*「✦」 𝗜𝗠𝗔𝗚𝗘𝗡*\n> ✖ ᴇʀʀᴏʀ » *No pude buscar imágenes ahora. Inténtalo más tarde.*')
     }
   },
 }

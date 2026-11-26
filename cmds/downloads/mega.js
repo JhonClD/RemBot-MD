@@ -97,19 +97,19 @@ export default {
   run: async ({ msg, sock, args, usedPrefix, text }) => {
     const url = (text || '').trim()
     if (!url) {
-      return msg.reply(`Pega un enlace de MEGA.\nEjemplo: *${usedPrefix}mega ${exampleLink()}*`)
+      return msg.reply(`*「✦」 𝗠𝗘𝗚𝗔*\n> ✐ ᴜsᴏ » *${usedPrefix}mega <enlace de MEGA>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}mega ${exampleLink()}_`)
     }
     if (!new RegExp(`^https?://(www\\.)?${MEGA_HOST.replace('.', '\\.')}/(file/|folder/|#![^!]+!)`, 'i').test(url)) {
-      return msg.reply('Ese enlace no parece de MEGA. Tiene que ser un archivo público: ' + exampleLink())
+      return msg.reply(`*「✦」 𝗠𝗘𝗚𝗔*\n> ✖ ᴇʀʀᴏʀ » *Ese enlace no parece de MEGA. Tiene que ser un archivo público: ${exampleLink()}*`)
     }
     try {
       const { buffer, name, size } = await megaDownload(url)
       const ext = path.extname(name)
-      const caption = `*MEGA*\n\n*Nombre:* ${name}\n*Tamaño:* ${formatBytes(size)}\n*Tipo:* ${mimeFor(ext)}\n\n*Enlace:* ${url}`
+      const caption = `*「✦」 𝗠𝗘𝗚𝗔*\n> ❀ ɴᴏᴍʙʀᴇ » *${name}*\n> ❒ ᴛᴀᴍᴀñᴏ » *${formatBytes(size)}*\n> ✰ ᴛɪᴘᴏ » *${mimeFor(ext)}*\n> 🜸 ʟɪɴᴋ » _${url}_`
       await sock.sendMessage(msg.chat, { document: buffer, mimetype: mimeFor(ext), fileName: name, caption }, { quoted: msg })
     } catch (error) {
       console.error('[mega] error:', error?.stack || error)
-      await msg.reply(error?.message || 'No pude descargar ese archivo de MEGA. Inténtalo más tarde.')
+      await msg.reply(`*「✦」 𝗠𝗘𝗚𝗔*\n> ✖ ᴇʀʀᴏʀ » *${error?.message || 'No pude descargar ese archivo de MEGA. Inténtalo más tarde.'}*`)
     }
   },
 }

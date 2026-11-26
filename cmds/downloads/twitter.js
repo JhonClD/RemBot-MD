@@ -65,15 +65,15 @@ export default {
   description: 'Descarga un video o imagen de Twitter/X. Uso: `x <enlace del post>.',
   run: async ({ msg, sock, args, usedPrefix }) => {
     if (!args[0]) {
-      return msg.reply(`Pega un enlace de Twitter/X.\nEjemplo: *${usedPrefix}x https://x.com/usuario/status/123456789*`)
+      return msg.reply(`*「✦」 𝗧𝗪𝗜𝗧𝗧𝗘𝗥 / 𝗫*\n> ✐ ᴜsᴏ » *${usedPrefix}x <enlace de Twitter/X>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}x https://x.com/usuario/status/123456789_`)
     }
     if (!/(twitter|x)\.com\/\w+\/status\//.test(args[0])) {
-      return msg.reply('Ese enlace no parece de Twitter/X. Revisa que sea un post con video o imagen.')
+      return msg.reply('*「✦」 𝗧𝗪𝗜𝗧𝗧𝗘𝗥 / 𝗫*\n> ✖ ᴇʀʀᴏʀ » *Ese enlace no parece de Twitter/X. Revisa que sea un post con video o imagen.*')
     }
     try {
       const data = await getTwitterMedia(args[0])
-      if (!data) return msg.reply('No pude obtener ese contenido. Puede ser privado o el post no tiene medio descargable.')
-      const caption = `*Twitter/X*\n\n${data.title ? `*Texto:* ${data.title}\n` : ''}${data.author ? `*Autor:* ${data.author}\n` : ''}${data.date ? `*Fecha:* ${data.date}\n` : ''}${data.duration ? `*Duración:* ${data.duration}\n` : ''}${data.resolution ? `*Resolución:* ${data.resolution}\n` : ''}${data.views ? `*Vistas:* ${data.views}\n` : ''}${data.likes ? `*Likes:* ${data.likes}\n` : ''}${data.comments ? `*Comentarios:* ${data.comments}\n` : ''}${data.retweets ? `*Retweets:* ${data.retweets}\n` : ''}*Enlace:* ${args[0]}`
+      if (!data) return msg.reply('*「✦」 𝗧𝗪𝗜𝗧𝗧𝗘𝗥 / 𝗫*\n> ✖ ᴇʀʀᴏʀ » *No pude obtener ese contenido. Puede ser privado o el post no tiene medio descargable.*')
+      const caption = `*「✦」 𝗧𝗪𝗜𝗧𝗧𝗘𝗥 / 𝗫*${data.title ? `\n> ❝ ᴛᴇxᴛᴏ » *${data.title}*` : ''}${data.author ? `\n> ✐ ᴀᴜᴛᴏʀ » *${data.author}*` : ''}${data.date ? `\n> ⊞ ғᴇᴄʜᴀ » *${data.date}*` : ''}${data.duration ? `\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${data.duration}*` : ''}${data.resolution ? `\n> ✰ ʀᴇsᴏʟᴜᴄɪóɴ » *${data.resolution}*` : ''}${data.views ? `\n> ✧ ᴠɪsᴛᴀs » *${data.views}*` : ''}${data.likes ? `\n> ♥ ʟɪᴋᴇs » *${data.likes}*` : ''}${data.comments ? `\n> ✎ ᴄᴏᴍᴇɴᴛᴀʀɪᴏs » *${data.comments}*` : ''}${data.retweets ? `\n> ↻ ʀᴇᴛᴡᴇᴇᴛs » *${data.retweets}*` : ''}\n> 🜸 ʟɪɴᴋ » _${args[0]}_`
       if (data.type === 'video') {
         await sock.sendMessage(msg.chat, { video: { url: data.url }, caption, mimetype: 'video/mp4', fileName: 'twitter.mp4' }, { quoted: msg })
       } else if (data.type === 'image') {
@@ -83,7 +83,7 @@ export default {
       }
     } catch (error) {
       console.error('[twitter] error:', error?.stack || error)
-      await msg.reply('No pude descargar ese contenido de Twitter/X. Inténtalo más tarde.')
+      await msg.reply('*「✦」 𝗧𝗪𝗜𝗧𝗧𝗘𝗥 / 𝗫*\n> ✖ ᴇʀʀᴏʀ » *No pude descargar ese contenido de Twitter/X. Inténtalo más tarde.*')
     }
   },
 }

@@ -197,26 +197,27 @@ export default {
   run: async ({ msg, sock, args, usedPrefix, text }) => {
     const url = (text || '').trim()
     if (!url) {
-      return msg.reply(`Pega un enlace de MediaFire.\nEjemplo: *${usedPrefix}mf https://www.mediafire.com/file/abc123/archivo.zip*`)
+      return msg.reply(`*「✦」 𝗠𝗘𝗗𝗜𝗔𝗙𝗜𝗥𝗘*\n> ✐ ᴜsᴏ » *${usedPrefix}mf <enlace de MediaFire>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}mf https://www.mediafire.com/file/abc123/archivo.zip_`)
     }
     if (!/^https?:\/\/(www\.)?mediafire\.com\/.+/i.test(url)) {
-      return msg.reply('Ese enlace no parece de MediaFire. Revisa que sea un archivo compartido.')
+      return msg.reply('*「✦」 𝗠𝗘𝗗𝗜𝗔𝗙𝗜𝗥𝗘*\n> ✖ ᴇʀʀᴏʀ » *Ese enlace no parece de MediaFire. Revisa que sea un archivo compartido.*')
     }
     try {
       const scraped = await mediafireDl(url)
-      if (!scraped?.downloadLink) return msg.reply('No pude obtener ese archivo.')
+      if (!scraped?.downloadLink) return msg.reply('*「✦」 𝗠𝗘𝗗𝗜𝗔𝗙𝗜𝗥𝗘*\n> ✖ ᴇʀʀᴏʀ » *No pude obtener ese archivo.*')
       const sizeBytes = parseSize(scraped.size)
       if (sizeBytes && sizeBytes > MAX_SIZE) {
-        return msg.reply(`Ese archivo pesa ${formatBytes(sizeBytes)} y supera el límite de WhatsApp para documentos (2 GB).`)
+        return msg.reply(`*「✦」 𝗠𝗘𝗗𝗜𝗔𝗙𝗜𝗥𝗘*\n> ✖ ᴇʀʀᴏʀ » *Ese archivo pesa ${formatBytes(sizeBytes)} y supera el límite de WhatsApp para documentos (2 GB).*`)
       }
       const title = (scraped.filename || 'archivo').trim()
       const ext = path.extname(title) || (scraped.type ? `.${scraped.type}` : '')
       const tipo = mimeFor(ext)
-      let info = '*MediaFire*\n\n'
-      info += `*Nombre:* ${title}\n`
-      info += `*Tipo:* ${tipo}\n`
-      if (scraped.size) info += `*Peso:* ${scraped.size}\n`
-      if (scraped.uploaded) info += `*Subido:* ${scraped.uploaded}\n`
+      let info = '*「✦」 𝗠𝗘𝗗𝗜𝗔𝗙𝗜𝗥𝗘*\n'
+      info += `> ❀ ɴᴏᴍʙʀᴇ » *${title}*\n`
+      info += `> ✰ ᴛɪᴘᴏ » *${tipo}*\n`
+      if (scraped.size) info += `> ❒ ᴘᴇsᴏ » *${scraped.size}*\n`
+      if (scraped.uploaded) info += `> ⊞ sᴜʙɪᴅᴏ » *${scraped.uploaded}*`
+      info = info.replace(/\n$/, '')
       await sock.sendMessage(msg.chat, {
         document: { url: scraped.downloadLink },
         mimetype: tipo,
@@ -226,7 +227,7 @@ export default {
       }, { quoted: msg })
     } catch (error) {
       console.error('[mediafire] error:', error?.stack || error)
-      await msg.reply(error?.message || 'No pude descargar ese archivo de MediaFire. Inténtalo más tarde.')
+      await msg.reply(`*「✦」 𝗠𝗘𝗗𝗜𝗔𝗙𝗜𝗥𝗘*\n> ✖ ᴇʀʀᴏʀ » *${error?.message || 'No pude descargar ese archivo de MediaFire. Inténtalo más tarde.'}*`)
     }
   },
 }

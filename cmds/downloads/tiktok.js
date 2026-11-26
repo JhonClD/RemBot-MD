@@ -22,7 +22,7 @@ function fmtNum(n) {
 }
 
 function buildCaption({ title, author, duration, stats, createdAt }) {
-  return `*TikTok*\n\n*Título:* ${title || 'Sin título'}\n*Autor:* ${author?.nickname || author?.unique_id || 'Desconocido'}${author?.unique_id ? ` (@${author.unique_id})` : ''}\n*Duración:* ${duration || 'N/A'}\n*Likes:* ${fmtNum(stats?.digg_count ?? stats?.likes)}\n*Comentarios:* ${fmtNum(stats?.comment_count ?? stats?.comments)}\n*Vistas:* ${fmtNum(stats?.play_count ?? stats?.views ?? stats?.plays)}\n*Compartidos:* ${fmtNum(stats?.share_count ?? stats?.shares)}\n*Fecha:* ${createdAt || 'N/A'}`
+  return `*「✦」 𝗧𝗜𝗞𝗧𝗢𝗞*\n> ❀ ᴛíᴛᴜʟᴏ » *${title || 'Sin título'}*\n> ✐ ᴀᴜᴛᴏʀ » *${author?.nickname || author?.unique_id || 'Desconocido'}${author?.unique_id ? ` (@${author.unique_id})` : ''}*\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${duration || 'N/A'}*\n> ♥ ʟɪᴋᴇs » *${fmtNum(stats?.digg_count ?? stats?.likes)}*\n> ✎ ᴄᴏᴍᴇɴᴛᴀʀɪᴏs » *${fmtNum(stats?.comment_count ?? stats?.comments)}*\n> ✧ ᴠɪsᴛᴀs » *${fmtNum(stats?.play_count ?? stats?.views ?? stats?.plays)}*\n> ↗ ᴄᴏᴍᴘᴀʀᴛɪᴅᴏs » *${fmtNum(stats?.share_count ?? stats?.shares)}*\n> ⊞ ғᴇᴄʜᴀ » *${createdAt || 'N/A'}*`
 }
 
 // Envía el álbum; si falla, manda las imágenes una por una.
@@ -46,17 +46,17 @@ export default {
   description: 'Descarga un video o foto de TikTok. Uso: `tt <enlace de TikTok>.',
   run: async ({ msg, sock, args, usedPrefix }) => {
     if (!args?.length) {
-      return msg.reply(`Pega un enlace de TikTok.\nEjemplo: *${usedPrefix}tt https://www.tiktok.com/@usuario/video/123456789*`)
+      return msg.reply(`*「✦」 𝗧𝗜𝗞𝗧𝗢𝗞*\n> ✐ ᴜsᴏ » *${usedPrefix}tt <enlace de TikTok>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}tt https://www.tiktok.com/@usuario/video/123456789_`)
     }
     const text = args.join(' ').trim()
     if (!TIKTOK_RE.test(text)) {
-      return msg.reply('Necesito un enlace de TikTok. La búsqueda por texto no está disponible en este comando.')
+      return msg.reply('*「✦」 𝗧𝗜𝗞𝗧𝗢𝗞*\n> ✖ ᴇʀʀᴏʀ » *Necesito un enlace de TikTok. La búsqueda por texto no está disponible en este comando.*')
     }
     try {
       const json = await fetchJson(`https://www.tikwm.com/api/?url=${encodeURIComponent(text)}&hd=1`)
       const data = json?.data
       if (json?.code !== 0 || !data) {
-        return msg.reply('No encontré contenido válido en ese enlace de TikTok.')
+        return msg.reply('*「✦」 𝗧𝗜𝗞𝗧𝗢𝗞*\n> ✖ ᴇʀʀᴏʀ » *No encontré contenido válido en ese enlace de TikTok.*')
       }
       const caption = buildCaption({
         title: data.title,
@@ -76,12 +76,12 @@ export default {
       }
       const videoUrl = data.play || data.wmplay
       if (!videoUrl) {
-        return msg.reply('Ese enlace no tiene video descargable.')
+        return msg.reply('*「✦」 𝗧𝗜𝗞𝗧𝗢𝗞*\n> ✖ ᴇʀʀᴏʀ » *Ese enlace no tiene video descargable.*')
       }
       await sock.sendMessage(msg.chat, { video: { url: videoUrl }, caption }, { quoted: msg })
     } catch (error) {
       console.error('[tiktok] error:', error?.stack || error)
-      await msg.reply(error?.message || 'No pude descargar ese TikTok. Inténtalo más tarde.')
+      await msg.reply(`*「✦」 𝗧𝗜𝗞𝗧𝗢𝗞*\n> ✖ ᴇʀʀᴏʀ » *${error?.message || 'No pude descargar ese TikTok. Inténtalo más tarde.'}*`)
     }
   },
 }

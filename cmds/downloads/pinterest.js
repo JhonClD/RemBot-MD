@@ -91,13 +91,13 @@ export default {
   run: async ({ msg, sock, args, usedPrefix }) => {
     const text = args.join(' ').trim()
     if (!text) {
-      return msg.reply(`Escribe una búsqueda o pega un enlace de Pinterest.\nEjemplos:\n*${usedPrefix}pin gatos*\n*${usedPrefix}pin https://www.pinterest.com/pin/123456/*`)
+      return msg.reply(`*「✦」 𝗣𝗜𝗡𝗧𝗘𝗥𝗘𝗦𝗧*\n> ✐ ᴜsᴏ » *${usedPrefix}pin <búsqueda o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}pin gatos_\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}pin https://www.pinterest.com/pin/123456/_`)
     }
     try {
       if (/^https?:\/\//.test(text)) {
         const data = await getPinterestDownload(text)
-        if (!data) return msg.reply('No pude obtener ese pin. Revisa el enlace e inténtalo de nuevo.')
-        const caption = `*Pinterest*\n\n${data.title ? `*Título:* ${data.title}\n` : ''}${data.author ? `*Autor:* ${data.author}\n` : ''}${data.format ? `*Formato:* ${data.format}\n` : ''}*Enlace:* ${text}`
+        if (!data) return msg.reply('*「✦」 𝗣𝗜𝗡𝗧𝗘𝗥𝗘𝗦𝗧*\n> ✖ ᴇʀʀᴏʀ » *No pude obtener ese pin. Revisa el enlace e inténtalo de nuevo.*')
+        const caption = `*「✦」 𝗣𝗜𝗡𝗧𝗘𝗥𝗘𝗦𝗧*${data.title ? `\n> ❀ ᴛíᴛᴜʟᴏ » *${data.title}*` : ''}${data.author ? `\n> ✐ ᴀᴜᴛᴏʀ » *${data.author}*` : ''}${data.format ? `\n> ✰ ᴛɪᴘᴏ » *${data.format}*` : ''}\n> 🜸 ʟɪɴᴋ » _${text}_`
         if (data.type === 'video') {
           await sock.sendMessage(msg.chat, { video: { url: data.url }, caption, mimetype: 'video/mp4', fileName: data.filename || 'pin.mp4' }, { quoted: msg })
         } else if (data.type === 'image') {
@@ -109,7 +109,7 @@ export default {
       }
       const results = await getPinterestSearch(text)
       if (!results?.length) {
-        return msg.reply(`No encontré resultados para *${text}*.`)
+        return msg.reply(`*「✦」 𝗣𝗜𝗡𝗧𝗘𝗥𝗘𝗦𝗧*\n> ✖ ᴇʀʀᴏʀ » *No encontré resultados para ${text}.*`)
       }
       const medias = results
         .slice(0, 10)
@@ -117,15 +117,15 @@ export default {
         .map(r => ({
           type: r.type === 'video' ? 'video' : 'image',
           data: { url: r.image },
-          caption: `*Pinterest*\n\n${r.title ? `*Título:* ${r.title}\n` : ''}${r.name ? `*Autor:* ${r.name}\n` : ''}${r.likes ? `*Likes:* ${r.likes}\n` : ''}${r.url ? `*Enlace:* ${r.url}\n` : ''}`,
+          caption: `*「✦」 𝗣𝗜𝗡𝗧𝗘𝗥𝗘𝗦𝗧*${r.title ? `\n> ❀ ᴛíᴛᴜʟᴏ » *${r.title}*` : ''}${r.name ? `\n> ✐ ᴀᴜᴛᴏʀ » *${r.name}*` : ''}${r.likes ? `\n> ♥ ʟɪᴋᴇs » *${r.likes}*` : ''}${r.url ? `\n> 🜸 ʟɪɴᴋ » _${r.url}_` : ''}`,
         }))
       if (!medias.length) {
-        return msg.reply(`No pude obtener descargas válidas para *${text}*.`)
+        return msg.reply(`*「✦」 𝗣𝗜𝗡𝗧𝗘𝗥𝗘𝗦𝗧*\n> ✖ ᴇʀʀᴏʀ » *No pude obtener descargas válidas para ${text}.*`)
       }
       await sendMedias({ sock, chat: msg.chat, msg, medias })
     } catch (error) {
       console.error('[pinterest] error:', error?.stack || error)
-      await msg.reply('No pude buscar en Pinterest ahora. Inténtalo más tarde.')
+      await msg.reply('*「✦」 𝗣𝗜𝗡𝗧𝗘𝗥𝗘𝗦𝗧*\n> ✖ ᴇʀʀᴏʀ » *No pude buscar en Pinterest ahora. Inténtalo más tarde.*')
     }
   },
 }

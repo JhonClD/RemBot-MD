@@ -166,19 +166,19 @@ export default {
   description: 'Descarga un video o reel de Facebook. Uso: `fb <enlace de Facebook>.',
   run: async ({ msg, sock, args, usedPrefix }) => {
     if (!args[0]) {
-      return msg.reply(`Pega un enlace de Facebook.\nEjemplo: *${usedPrefix}fb https://www.facebook.com/reel/123456789*`)
+      return msg.reply(`*「✦」 𝗙𝗔𝗖𝗘𝗕𝗢𝗢𝗞*\n> ✐ ᴜsᴏ » *${usedPrefix}fb <enlace de Facebook>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}fb https://www.facebook.com/reel/123456789_`)
     }
     if (!/facebook\.com|fb\.watch|video\.fb\.com/i.test(args[0])) {
-      return msg.reply('Ese enlace no parece de Facebook. Revisa que sea un video o reel válido.')
+      return msg.reply('*「✦」 𝗙𝗔𝗖𝗘𝗕𝗢𝗢𝗞*\n> ✖ ᴇʀʀᴏʀ » *Ese enlace no parece de Facebook. Revisa que sea un video o reel válido.*')
     }
     try {
       const data = await getFacebookMedia(args[0])
-      if (!data) return msg.reply('No pude obtener ese video. Puede ser privado o el enlace no tiene video.')
-      const caption = `*Facebook*\n\n${data.title ? `*Título:* ${data.title}\n` : ''}${data.resolution ? `*Resolución:* ${data.resolution}\n` : ''}${data.format ? `*Formato:* ${data.format}\n` : ''}*Enlace:* ${args[0]}`
+      if (!data) return msg.reply('*「✦」 𝗙𝗔𝗖𝗘𝗕𝗢𝗢𝗞*\n> ✖ ᴇʀʀᴏʀ » *No pude obtener ese video. Puede ser privado o el enlace no tiene video.*')
+      const caption = `*「✦」 𝗙𝗔𝗖𝗘𝗕𝗢𝗢𝗞*${data.title ? `\n> ❀ ᴛíᴛᴜʟᴏ » *${data.title}*` : ''}${data.resolution ? `\n> ✰ ʀᴇsᴏʟᴜᴄɪóɴ » *${data.resolution}*` : ''}${data.format ? `\n> ✰ ᴛɪᴘᴏ » *${data.format}*` : ''}\n> 🜸 ʟɪɴᴋ » _${args[0]}_`
       await sock.sendMessage(msg.chat, { video: { url: data.url }, caption, mimetype: 'video/mp4', fileName: 'fb.mp4' }, { quoted: msg })
     } catch (error) {
       console.error('[facebook] error:', error?.stack || error)
-      await msg.reply(error?.message || 'No pude descargar ese video de Facebook. Inténtalo más tarde.')
+      await msg.reply(`*「✦」 𝗙𝗔𝗖𝗘𝗕𝗢𝗢𝗞*\n> ✖ ᴇʀʀᴏʀ » *${error?.message || 'No pude descargar ese video de Facebook. Inténtalo más tarde.'}*`)
     }
   },
 }

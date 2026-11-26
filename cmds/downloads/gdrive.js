@@ -234,19 +234,19 @@ export default {
   description: 'Descarga un archivo de Google Drive. Uso: `gdrive <enlace de Drive>.',
   run: async ({ msg, sock, args, usedPrefix }) => {
     if (!args[0]) {
-      return msg.reply(`Pega un enlace de Google Drive.\nEjemplo: *${usedPrefix}gdrive https://drive.google.com/file/d/ABC123/view*`)
+      return msg.reply(`*「✦」 𝗚𝗢𝗢𝗚𝗟𝗘 𝗗𝗥𝗜𝗩𝗘*\n> ✐ ᴜsᴏ » *${usedPrefix}gdrive <enlace de Google Drive>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}gdrive https://drive.google.com/file/d/ABC123/view_`)
     }
     const url = args[0]
     if (!/drive\.google\.com\/(file\/d\/|open\?id=|uc\?id=)|drive\.usercontent\.google\.com\/download/i.test(url)) {
-      return msg.reply('Ese enlace no parece de Google Drive. Revisa que sea un archivo compartido.')
+      return msg.reply('*「✦」 𝗚𝗢𝗢𝗚𝗟𝗘 𝗗𝗥𝗜𝗩𝗘*\n> ✖ ᴇʀʀᴏʀ » *Ese enlace no parece de Google Drive. Revisa que sea un archivo compartido.*')
     }
     try {
       const { buffer, fileName, fileSize, mimetype } = await gdriveDownload(url)
-      const caption = `*Google Drive*\n\n*Nombre:* ${fileName}\n*Tamaño:* ${formatBytes(fileSize)}\n*Tipo:* ${mimetype}\n\n*Enlace:* ${url}`
+      const caption = `*「✦」 𝗚𝗢𝗢𝗚𝗟𝗘 𝗗𝗥𝗜𝗩𝗘*\n> ❀ ɴᴏᴍʙʀᴇ » *${fileName}*\n> ❒ ᴛᴀᴍᴀñᴏ » *${formatBytes(fileSize)}*\n> ✰ ᴛɪᴘᴏ » *${mimetype}*\n> 🜸 ʟɪɴᴋ » _${url}_`
       await sock.sendMessage(msg.chat, { document: buffer, mimetype, fileName, caption }, { quoted: msg })
     } catch (error) {
       console.error('[gdrive] error:', error?.stack || error)
-      await msg.reply(error?.message || 'No pude descargar ese archivo de Drive. Inténtalo más tarde.')
+      await msg.reply(`*「✦」 𝗚𝗢𝗢𝗚𝗟𝗘 𝗗𝗥𝗜𝗩𝗘*\n> ✖ ᴇʀʀᴏʀ » *${error?.message || 'No pude descargar ese archivo de Drive. Inténtalo más tarde.'}*`)
     }
   },
 }

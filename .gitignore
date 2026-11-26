@@ -12,3 +12,4 @@ database.json
 lib/system/tmp/*
 lib/system/botstore.json
 lib/yt-dlp
+lib/cookies.txt

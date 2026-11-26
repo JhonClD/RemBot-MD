@@ -11,11 +11,11 @@
 // - Cuota de descargas superada ("Too many users have viewed...").
 // - Archivo de Google Docs/Sheets/Slides (no es binario; no se puede
 //   bajar por uc, necesita exportar).
-// - Archivo muy grande para WhatsApp (límite del comando: 100 MB).
+// - Archivo muy grande para WhatsApp (límite de WhatsApp para documentos: 2 GB).
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-const MAX_SIZE = 100 * 1024 * 1024 // 100 MB
+const MAX_SIZE = 2 * 1024 * 1024 * 1024 // 2 GB: máximo que WhatsApp acepta por documento
 
 // Extrae el ID del archivo de cualquier forma de enlace de Drive.
 // OJO: la versión anterior usaba /id=(.+)/ y se tragaba "&usp=sharing",
@@ -110,7 +110,7 @@ async function fetchBuffer(url, maxSize) {
   const contentType = res.headers.get('content-type') || ''
   const contentLength = Number(res.headers.get('content-length'))
   if (Number.isFinite(contentLength) && contentLength > maxSize) {
-    throw new Error(`El archivo pesa ${formatBytes(contentLength)} y el límite es ${formatBytes(maxSize)}.`)
+    throw new Error(`El archivo pesa ${formatBytes(contentLength)} y supera el límite de WhatsApp para documentos (2 GB).`)
   }
   if (!res.ok) throw new Error(`Drive respondió HTTP ${res.status}.`)
   if (contentType.includes('text/html')) {
@@ -121,7 +121,7 @@ async function fetchBuffer(url, maxSize) {
   }
   const buffer = Buffer.from(await res.arrayBuffer())
   if (!buffer.length) throw new Error('Drive devolvió el archivo vacío.')
-  if (buffer.length > maxSize) throw new Error(`El archivo pesa ${formatBytes(buffer.length)} y el límite es ${formatBytes(maxSize)}.`)
+  if (buffer.length > maxSize) throw new Error(`El archivo pesa ${formatBytes(buffer.length)} y supera el límite de WhatsApp para documentos (2 GB).`)
   return { buffer, res }
 }
 
@@ -170,7 +170,7 @@ async function gdriveDownload(url) {
       }
     }
     if (size && size > MAX_SIZE) {
-      throw new Error(`El archivo pesa ${formatBytes(size)} y el límite es ${formatBytes(MAX_SIZE)}.`)
+      throw new Error(`El archivo pesa ${formatBytes(size)} y supera el límite de WhatsApp para documentos (2 GB).`)
     }
     const problem = detectDriveError(first.html)
     if (problem) throw new Error(problem)

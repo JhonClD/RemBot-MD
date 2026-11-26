@@ -36,6 +36,33 @@ function mimeFor(ext) {
   return EXT_MIME[String(ext || '').toLowerCase()] || 'application/octet-stream'
 }
 
+// Límite: 2 GB (máximo que WhatsApp acepta por documento). Sin este
+// tope, Baileys intenta subir archivos enormes y falla con ENOSPC
+// porque escribe varias copias temporales al enviar.
+const MAX_SIZE = 2 * 1024 * 1024 * 1024
+
+function parseSize(text) {
+  if (!text) return null
+  const match = String(text).trim().match(/([\d.,]+)\s*(bytes?|b|kb|kib|mb|mib|gb|gib)/i)
+  if (!match) return null
+  let valueText = match[1]
+  if (valueText.includes(',') && valueText.includes('.')) valueText = valueText.replace(/,/g, '')
+  else valueText = valueText.replace(',', '.')
+  const value = Number(valueText)
+  if (!Number.isFinite(value) || value <= 0) return null
+  const mult = { b: 1, byte: 1, bytes: 1, kb: 1024, kib: 1024, mb: 1024 ** 2, mib: 1024 ** 2, gb: 1024 ** 3, gib: 1024 ** 3 }
+  return Math.round(value * (mult[match[2].toLowerCase()] || 1))
+}
+
+function formatBytes(bytes = 0) {
+  if (!bytes || Number.isNaN(bytes)) return 'Desconocido'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = Number(bytes)
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++ }
+  return `${size.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`
+}
+
 function cleanText(x) {
   return String(x || '').replace(/\s+/g, ' ').trim()
 }
@@ -178,6 +205,10 @@ export default {
     try {
       const scraped = await mediafireDl(url)
       if (!scraped?.downloadLink) return msg.reply('No pude obtener ese archivo.')
+      const sizeBytes = parseSize(scraped.size)
+      if (sizeBytes && sizeBytes > MAX_SIZE) {
+        return msg.reply(`Ese archivo pesa ${formatBytes(sizeBytes)} y supera el límite de WhatsApp para documentos (2 GB).`)
+      }
       const title = (scraped.filename || 'archivo').trim()
       const ext = path.extname(title) || (scraped.type ? `.${scraped.type}` : '')
       const tipo = mimeFor(ext)

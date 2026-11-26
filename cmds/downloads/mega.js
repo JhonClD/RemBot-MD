@@ -2,12 +2,12 @@
 // Autor: Jhon 𝗖𝗜𝗗. Enlaces públicos con su clave en la URL
 // (file/<id>#<clave>). Sin API key ni cuenta: usa megajs.
 // Las carpetas no se pueden descargar (solo archivos sueltos).
-// Límite del comando: 100 MB.
+// Límite: 2 GB (máximo que WhatsApp acepta por documento).
 
 import { File } from 'megajs'
 import path from 'node:path'
 
-const MAX_SIZE = 100 * 1024 * 1024 // 100 MB
+const MAX_SIZE = 2 * 1024 * 1024 * 1024 // 2 GB: máximo de WhatsApp para documentos
 const MEGA_HOST = ['mega', 'nz'].join('.')
 
 const EXT_MIME = {
@@ -71,7 +71,7 @@ async function megaDownload(url) {
   const name = file.name || 'archivo'
   const size = Number(file.size) || 0
   if (size > MAX_SIZE) {
-    throw new Error(`El archivo pesa ${formatBytes(size)} y el límite es ${formatBytes(MAX_SIZE)}.`)
+    throw new Error(`El archivo pesa ${formatBytes(size)} y supera el límite de WhatsApp para documentos (2 GB).`)
   }
   let buffer
   try {
@@ -85,7 +85,7 @@ async function megaDownload(url) {
   }
   if (!buffer?.length) throw new Error('MEGA devolvió el archivo vacío.')
   if (buffer.length > MAX_SIZE) {
-    throw new Error(`El archivo pesa ${formatBytes(buffer.length)} y el límite es ${formatBytes(MAX_SIZE)}.`)
+    throw new Error(`El archivo pesa ${formatBytes(buffer.length)} y supera el límite de WhatsApp para documentos (2 GB).`)
   }
   return { buffer, name, size: buffer.length }
 }

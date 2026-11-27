@@ -6,8 +6,9 @@
 // OJO: tiene que ser el asset yt-dlp_linux (ELF standalone). El asset
 // yt-dlp a secas es un script de Python (zipapp): falla la validación
 // ELF y el contenedor no tiene Python para ejecutarlo.
-// Fallbacks de descarga: 1) yt-dlp 360p, 2) yt-dlp con cliente Android,
-// 3) yt-dlp 480p. Videos de más de 50 MB se mandan como documento;
+// Fallbacks de descarga: 1) yt-dlp 480p, 2) yt-dlp con cliente Android,
+// 3) yt-dlp con cliente iOS, 4) yt-dlp con TV embebido, 5) yt-dlp 480p
+// sin restricción de formato. Videos de más de 50 MB se mandan como documento;
 // más de 100 MB no se mandan (límite del comando).
 // Requiere: yt-search, play-dl (solo como info de respaldo), ffmpeg
 // en el servidor para unir video+audio (ya lo usa el bot).
@@ -35,6 +36,19 @@ const COOKIES_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..
 async function cookieArgs() {
   try { await fs.access(COOKIES_PATH); return ['--cookies', COOKIES_PATH] } catch { return [] }
 }
+
+// Registro de depuración de `play2` en el host (lib/system/play-debug.log,
+// el mismo que `play`): cada paso deja una línea con hora, para ver
+// exactamente dónde se queda y qué formato bajó cuando el video no se
+// puede reproducir. Nunca rompe el comando.
+const PLAY_DEBUG_LOG = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'lib', 'system', 'play-debug.log')
+async function logPlay(...parts) {
+  try {
+    const stat = await fs.stat(PLAY_DEBUG_LOG).catch(() => null)
+    if (stat && stat.size > 200 * 1024) await fs.rm(PLAY_DEBUG_LOG, { force: true }).catch(() => {})
+    await fs.appendFile(PLAY_DEBUG_LOG, `[${new Date().toISOString()}] ${parts.join(' ')}\n`)
+  } catch {}
+}
 const MAX_VIDEO_SIZE = 50 * 1024 * 1024 // 50 MB: por encima, documento
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB: límite del comando
 
@@ -60,6 +74,114 @@ function withTimeout(promise, ms, errorMessage) {
   ]).finally(() => clearTimeout(timer))
 }
 
+// ¿La búsqueda es de un OP/opening? ("op" como palabra, "opening",
+// "オープニング"). Cuando lo es, no vale el primer resultado sin más:
+// YouTube pone arriba la canción completa y el OP de TV queda abajo.
+function isOpQuery(query) {
+  return /\bop\b|opening|オープニング/i.test(query || '')
+}
+
+// Vistas en número, desde los formatos de yt-search (número, "9.9K",
+// "1.1M" o "9,900").
+function parseViewsCompact(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  const m = String(v || '').replace(/,/g, '').trim().match(/^([\d.]+)\s*([KMB])?$/i)
+  if (!m) return null
+  const n = parseFloat(m[1])
+  if (Number.isNaN(n)) return null
+  const mult = { K: 1e3, M: 1e6, B: 1e9 }[(m[2] || '').toUpperCase()] || 1
+  return Math.round(n * mult)
+}
+
+// Puntaje de un candidato a video de OP: el OP de TV dura ~1-2 min;
+// la canción completa (~4-5 min) y los re-subidos con "Full" no son
+// el video del OP. A igualdad de puntos, ganan las vistas.
+function scoreOpVideo({ title = '', durationSec = null, views = null }) {
+  let score = 0
+  const t = String(title)
+  if (durationSec != null && Number.isFinite(durationSec)) {
+    if (durationSec >= 20 && durationSec <= 150) score += 100
+    else if (durationSec > 150 && durationSec <= 240) score += 20
+    else if (durationSec > 240) score -= 50
+  }
+  if (/ノンクレジット|creditless/i.test(t)) score += 60
+  if (/オープニング映像|opening video|OP映像/i.test(t)) score += 40
+  if (/オープニング|opening|\bOP\b/i.test(t)) score += 20
+  if (/\bfull\b|フル/i.test(t)) score -= 30
+  if (/playlist|album|álbum|compilaci|compilation|todos los|all (openings|songs)|1\s*hora|1\s*hour|\b1h\b|\bmix\b/i.test(t)) score -= 80
+  if (views != null && Number.isFinite(views) && views > 0) score += Math.min(20, Math.log10(views + 1))
+  return score
+}
+
+// ¿La búsqueda pide la versión completa? ("full", "フル", "completa").
+// Cuando está, se quiere la canción completa (~4-5 min), no el OP de
+// TV corto: "Akane banashi op full" es la versión completa.
+function isFullQuery(query) {
+  return /\bfull\b|フル|complet[oa]/i.test(query || '')
+}
+
+// Puntaje de un candidato a versión completa: la canción completa
+// dura ~3-8 min. Un álbum/playlist/compilación (43 min) NO es la
+// versión completa de un OP, aunque diga "Full" y tenga más vistas.
+function scoreFullVideo({ title = '', durationSec = null, views = null }) {
+  let score = 0
+  const t = String(title)
+  if (durationSec != null && Number.isFinite(durationSec)) {
+    if (durationSec >= 180 && durationSec <= 480) score += 100
+    else if (durationSec > 480 && durationSec <= 900) score += 20
+    else if (durationSec > 900) score -= 60
+    else if (durationSec >= 150 && durationSec < 180) score += 20
+    else if (durationSec >= 20 && durationSec < 150) score -= 50
+  }
+  if (/\bfull\b|フル/i.test(t)) score += 40
+  if (/playlist|album|álbum|compilaci|compilation|todos los|all (openings|songs)|1\s*hora|1\s*hour|\b1h\b|\bmix\b/i.test(t)) score -= 80
+  if (/ノンクレジット|creditless/i.test(t)) score -= 20
+  if (/オープニング映像|opening video|OP映像/i.test(t)) score -= 20
+  if (views != null && Number.isFinite(views) && views > 0) score += Math.min(20, Math.log10(views + 1))
+  return score
+}
+
+// ¿La búsqueda pide un álbum/playlist? ("album", "playlist", "mix",
+// "compilación", "todos los"). Cuando está, SÍ se quiere el álbum:
+// la penalización de álbum solo vale cuando se busca un OP suelto.
+function isAlbumQuery(query) {
+  return /\b(album|álbum|playlist|mix|compilaci[oó]n|compilation)\b|todos los/i.test(query || '')
+}
+
+// Puntaje de un candidato a álbum/playlist: dura mucho y el título
+// lo dice; una canción suelta no es lo que se busca aquí.
+function scoreAlbumVideo({ title = '', durationSec = null, views = null }) {
+  let score = 0
+  const t = String(title)
+  if (durationSec != null && Number.isFinite(durationSec)) {
+    if (durationSec > 900) score += 100
+    else if (durationSec > 480 && durationSec <= 900) score += 20
+    else if (durationSec >= 180 && durationSec <= 480) score -= 30
+    else if (durationSec >= 20 && durationSec < 180) score -= 50
+  }
+  if (/playlist|album|álbum|compilaci|compilation|todos los|all (openings|songs)|\bmix\b/i.test(t)) score += 60
+  if (/\bfull\b|フル/i.test(t)) score += 20
+  if (views != null && Number.isFinite(views) && views > 0) score += Math.min(20, Math.log10(views + 1))
+  return score
+}
+
+// Elige el mejor video entre los candidatos: si la búsqueda pide un
+// álbum, el álbum; si pide la versión completa, la canción larga;
+// si es de un OP sin "full", el OP de TV (corto, sin créditos);
+// si no, el primero como siempre.
+function pickBestVideo(candidates, query) {
+  if (!candidates?.length) return null
+  const scoreFn = isAlbumQuery(query) ? scoreAlbumVideo : (isFullQuery(query) ? scoreFullVideo : (isOpQuery(query) ? scoreOpVideo : null))
+  if (!scoreFn) return candidates[0]
+  let best = candidates[0]
+  let bestScore = -Infinity
+  for (const c of candidates) {
+    const s = scoreFn(c)
+    if (s > bestScore) { bestScore = s; best = c }
+  }
+  return best
+}
+
 async function getVideoMeta(input) {
   const id = getVideoId(input)
   if (id) {
@@ -75,21 +197,31 @@ async function getVideoMeta(input) {
   }
   // Búsqueda por nombre: primero yt-search (rápido) y si no encuentra
   // nada (YouTube bloquea el scraping desde el servidor), yt-dlp.
+  // No se toma el primer resultado sin más: si se busca un OP, se
+  // prefiere el video del OP de TV entre los primeros resultados.
   try {
     const search = await withTimeout(yts(input), 12000, 'YouTube no responde a la búsqueda desde el servidor. Prueba con el enlace directo del video.')
-    const video = search.videos?.[0] || search.all?.find(v => v.type === 'video')
-    if (video?.url || video?.videoId) {
-      return { url: video.url, title: video.title, channel: video.author?.name || video.author, duration: video.timestamp, views: video.views, thumbnail: video.thumbnail || video.image, ago: video.ago }
+    const pool = (search.videos || []).filter(v => v?.url || v?.videoId)
+    if (!pool.length) pool.push(...(search.all || []).filter(v => v?.type === 'video' && (v?.url || v?.videoId)))
+    if (pool.length) {
+      const cands = pool.map(v => ({
+        title: v.title, url: v.url, channel: v.author?.name || v.author,
+        duration: v.timestamp, durationSec: parseDurationSeconds(v.timestamp),
+        views: parseViewsCompact(v.views), thumbnail: v.thumbnail || v.image, ago: v.ago,
+      }))
+      const best = pickBestVideo(cands, input)
+      if (best) return { url: best.url, title: best.title, channel: best.channel, duration: best.duration, views: best.views, thumbnail: best.thumbnail, ago: best.ago }
     }
   } catch {}
-  const dl = await fetchYtDlpInfo(`ytsearch1:${input}`)
+  const dl = await fetchYtDlpInfo(`ytsearch5:${input}`)
   if (dl) return { url: dl.url, title: dl.title, channel: dl.author, duration: dl.timestamp, views: dl.views, thumbnail: dl.thumbnail, ago: dl.ago, stats: dl.stats }
   throw new Error('No encontré un video válido de YouTube para eso.')
 }
 
 // Info del video con yt-dlp (innertube + cookies). Mucho más fiable
 // que el scraping de yt-search cuando YouTube bloquea la IP del
-// servidor. `target` es una URL o `ytsearch1:<búsqueda>`.
+// servidor. `target` es una URL o `ytsearch5:<búsqueda>` (varios
+// resultados para poder elegir el mejor si se busca un OP).
 async function fetchYtDlpInfo(target) {
   try {
     const ytdlp = await ensureYtDlp()
@@ -100,7 +232,21 @@ async function fetchYtDlpInfo(target) {
       ...cookies,
       target,
     ], { timeout: 30000, maxBuffer: 5 * 1024 * 1024 })
-    const data = JSON.parse(String(stdout).trim().split('\n')[0])
+    const datas = []
+    for (const line of String(stdout).trim().split('\n')) {
+      if (!line.trim().startsWith('{')) continue
+      try { const d = JSON.parse(line); if (d?.id) datas.push(d) } catch {}
+    }
+    if (!datas.length) return null
+    let data = datas[0]
+    const m = String(target).match(/^ytsearch\d*:(.+)$/i)
+    if (m && datas.length > 1) {
+      const cands = datas.map(d => ({
+        title: d.title, durationSec: Number(d.duration),
+        views: Number(d.view_count), data: d,
+      }))
+      data = pickBestVideo(cands, m[1])?.data || datas[0]
+    }
     if (!data?.id) return null
     const durationSec = Number(data.duration)
     const views = Number(data.view_count)
@@ -212,18 +358,26 @@ async function getVideo(url) {
     const ytdlp = await ensureYtDlp()
     // OJO: iOS y Android fallan en este host (2026-11-26), así que web
     // va primero; si web falla, se prueban los demás.
+    // El video tiene que ser H.264 (avc1): YouTube también sirve AV1/VP9
+    // en mp4 y WhatsApp no los reproduce ("hay un problema con el archivo
+    // de video"). Por eso el formato exige [vcodec^=avc1].
     const attempts = [
-      ['bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360][ext=mp4]/b[height<=360]', []],
-      ['bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360][ext=mp4]/b[height<=360]', ['--extractor-args', 'youtube:player_client=android,web']],
-      ['bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360][ext=mp4]/b[height<=360]', ['--extractor-args', 'youtube:player_client=ios']],
-      ['bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360][ext=mp4]/b[height<=360]', ['--extractor-args', 'youtube:player_client=tv_embedded']],
-      ['bv*[height<=480]+ba/b[height<=480]', []],
+      ['bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=480][ext=mp4][vcodec^=avc1]', []],
+      ['bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=480][ext=mp4][vcodec^=avc1]', ['--extractor-args', 'youtube:player_client=android,web']],
+      ['bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=480][ext=mp4][vcodec^=avc1]', ['--extractor-args', 'youtube:player_client=ios']],
+      ['bv*[height<=480][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=480][ext=mp4][vcodec^=avc1]', ['--extractor-args', 'youtube:player_client=tv_embedded']],
+      ['bv*[height<=360][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=360][ext=mp4][vcodec^=avc1]', []],
     ]
-    for (const [format, extra] of attempts) {
+    const clientNames = ['web', 'android', 'ios', 'tv', '360p']
+    for (let i = 0; i < attempts.length; i++) {
+      const [format, extra] = attempts[i]
       try {
-        return await downloadWithYtDlp(ytdlp, url, tmpDir, format, extra)
+        const video = await downloadWithYtDlp(ytdlp, url, tmpDir, format, extra)
+        await logPlay(`yt-dlp ${clientNames[i]} OK:`, video.filePath.split('/').pop(), `${(video.size / 1024 / 1024).toFixed(2)} MB`)
+        return video
       } catch (error) {
-        errors.push(`${format.slice(0, 20)}…: ${error.message}`)
+        errors.push(`${clientNames[i]}: ${error.message}`)
+        await logPlay(`yt-dlp ${clientNames[i]} falló:`, String(error.message).slice(0, 200))
       }
     }
     throw new Error(`No pude descargar el video (${errors.join(' | ')}).`)
@@ -231,13 +385,6 @@ async function getVideo(url) {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
     throw error
   }
-}
-
-async function getThumbnail(url) {
-  const res = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000) })
-  if (!res.ok) return null
-  const buffer = Buffer.from(await res.arrayBuffer())
-  return buffer.length ? buffer : null
 }
 
 function sanitizeFileName(name = 'video') {
@@ -315,6 +462,7 @@ export default {
       return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}play2 <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}play2 despacito_`)
     }
     const input = args.join(' ').trim()
+    await logPlay('play2 inicio:', input.slice(0, 80))
     await msg.react?.('⏳').catch(() => {})
     let tmpDir = null
     try {
@@ -337,11 +485,11 @@ export default {
             const stats = await withTimeout(statsPromise, 10000, 'stats').catch(() => ({ views: null, timestamp: null }))
             const views = stats.views ?? meta.views
             const lanzamiento = stats.timestamp ? relativeTimeEs(stats.timestamp) : agoToEs(meta.ago)
-            // Tamaño estimado del video (360p ≈ 900 kbps × duración): el
+            // Tamaño estimado del video (480p ≈ 1500 kbps × duración): el
             // tamaño exacto solo se conoce al bajarlo, es solo orientativo.
             const durationSec = parseDurationSeconds(meta.duration)
-            const sizeMB = durationSec ? (900 * durationSec / 8 / 1024).toFixed(2) : null
-            const infoMessage = `*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ❀ ᴛíᴛᴜʟᴏ » *${title}*\n> ✐ ᴄᴀɴᴀʟ » *${meta.channel || 'Desconocido'}*\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${meta.duration || 'Desconocida'}* │ ✧ *${views != null ? formatViewsCompact(views) : 'Desconocido'}* vistas\n> ✰ ʀᴇsᴏʟᴜᴄɪóɴ » *360p* │ ❒ *${sizeMB ? `${sizeMB} MB` : 'Desconocido'}*\n> ⊞ ʟᴀɴᴢᴀᴍɪᴇɴᴛᴏ » *${lanzamiento || 'Desconocido'}*\n> 🜸 ʟɪɴᴋ » _${url}_`
+            const sizeMB = durationSec ? (1500 * durationSec / 8 / 1024).toFixed(2) : null
+            const infoMessage = `*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ❀ ᴛíᴛᴜʟᴏ » *${title}*\n> ✐ ᴄᴀɴᴀʟ » *${meta.channel || 'Desconocido'}*\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${meta.duration || 'Desconocida'}* │ ✧ *${views != null ? formatViewsCompact(views) : 'Desconocido'}* vistas\n> ✰ ʀᴇsᴏʟᴜᴄɪóɴ » *480p* │ ❒ *${sizeMB ? `${sizeMB} MB` : 'Desconocido'}*\n> ⊞ ʟᴀɴᴢᴀᴍɪᴇɴᴛᴏ » *${lanzamiento || 'Desconocido'}*\n> 🜸 ʟɪɴᴋ » _${url}_`
             if (meta.thumbnail) {
               await withTimeout(sock.sendMessage(msg.chat, { image: { url: meta.thumbnail }, caption: infoMessage }, { quoted: msg }), 20000, 'La tarjeta de info no se pudo enviar.')
             } else {
@@ -359,22 +507,41 @@ export default {
       await Promise.race([cardPromise, new Promise(resolve => setTimeout(resolve, 2000))])
       const sizeText = formatBytes(size)
       const sendAsDocument = size > MAX_VIDEO_SIZE
-      const caption = `*${title}*\n\n*Canal:* ${meta.channel || 'Desconocido'}\n*Calidad:* 360p\n*Tamaño:* ${sizeText}`
+      await logPlay('video listo, enviando:', fileName, sizeText, sendAsDocument ? '(documento)' : '(video)')
       const buffer = await fs.readFile(filePath)
       if (sendAsDocument) {
-        await sock.sendMessage(msg.chat, { document: buffer, mimetype: 'video/mp4', fileName, caption }, { quoted: msg })
+        await sock.sendMessage(msg.chat, { document: buffer, mimetype: 'video/mp4', fileName }, { quoted: msg })
+        await logPlay('video enviado OK:', fileName, '(documento, +50 MB)')
       } else {
-        try {
-          await sock.sendMessage(msg.chat, {
-            video: buffer,
-            mimetype: 'video/mp4',
-            fileName,
-            caption,
-            ...(meta.thumbnail ? { jpegThumbnail: await getThumbnail(meta.thumbnail).catch(() => null) } : {}),
-          }, { quoted: msg })
-        } catch {
-          await sock.sendMessage(msg.chat, { document: buffer, mimetype: 'video/mp4', fileName, caption }, { quoted: msg })
+        // Sin jpegThumbnail propio y sin caption: WhatsApp mismo genera
+        // la miniatura del video. Las miniaturas mandadas por el bot
+        // (Buffer, base64, chica) nunca se vieron antes de descargar.
+        const durationSec = parseDurationSeconds(meta.duration)
+        await logPlay('miniatura: la genera WhatsApp')
+        // El envío como video a veces falla (el de 28.40 MB llegó como
+        // documento sin dejar rastro): se reintenta una vez y el error
+        // queda en el log antes de caer al documento.
+        let sentAsVideo = false
+        let lastError = null
+        for (let attempt = 0; attempt < 2 && !sentAsVideo; attempt++) {
+          try {
+            await sock.sendMessage(msg.chat, {
+              video: buffer,
+              mimetype: 'video/mp4',
+              fileName,
+              ...(durationSec ? { seconds: durationSec } : {}),
+            }, { quoted: msg })
+            sentAsVideo = true
+          } catch (error) {
+            lastError = error
+            await logPlay(`envío como video falló (intento ${attempt + 1}):`, String(error?.message || error).slice(0, 300))
+          }
         }
+        if (!sentAsVideo) {
+          await logPlay('mando como documento, el video falló 2 veces:', String(lastError?.message || '').slice(0, 200))
+          await sock.sendMessage(msg.chat, { document: buffer, mimetype: 'video/mp4', fileName }, { quoted: msg })
+        }
+        await logPlay('video enviado OK:', fileName, sentAsVideo ? '(video)' : '(documento)')
       }
       await msg.react?.('✅').catch(() => {})
     } catch (error) {

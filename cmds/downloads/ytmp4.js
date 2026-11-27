@@ -924,31 +924,37 @@ async function getVideoStats(url) {
   }
 }
 
-// Elige el nivel de calidad óptimo según la duración:
-// - Videos de hasta 10 min: 1080p H.264 (video <200 MB para no pasar el límite de 250 MB;
-//   si no cabe, baja a 720p y luego a 480p). Si pesa >50 MB se envía como documento.
-// - Videos medios (10–20 min): 480p H.264.
-// - Videos largos (>20 min): 360p H.264 para no pasar el límite del comando.
-function selectQualityTier(durationSec) {
-  if (durationSec && durationSec > 0 && durationSec <= 600) {
-    return {
-      label: '1080p',
-      estKbps: 3500,
-      format: '(bv*[height<=1080][vcodec^=avc1][filesize<200M]/bv*[height<=1080][vcodec^=avc1][filesize_approx<200M]/bv*[height<=720][vcodec^=avc1][filesize<120M]/bv*[height<=720][vcodec^=avc1][filesize_approx<120M]/bv*[height<=480][vcodec^=avc1])+(ba[ext=m4a][abr<=160]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)/b[height<=1080][vcodec^=avc1]/b[height<=720][vcodec^=avc1]/b[height<=480][vcodec^=avc1]',
-    }
-  }
-  if (durationSec && durationSec > 1200) {
-    return {
-      label: '360p',
-      estKbps: 850,
-      format: '(bv*[height<=360][vcodec^=avc1])+(ba[ext=m4a][abr<=128]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)/b[height<=360][vcodec^=avc1]/b[height<=360]',
-    }
-  }
-  return {
-    label: '480p',
-    estKbps: 1400,
-    format: '(bv*[height<=480][vcodec^=avc1])+(ba[ext=m4a][abr<=140]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)/b[height<=480][vcodec^=avc1]/b[height<=480]',
-  }
+const AUDIO_SEL = '(ba[ext=m4a][abr<=160]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)'
+
+// Niveles de calidad H.264. Los filtros de tamaño evitan pasar el límite del comando
+// (250 MB): si el 1080p no cabe baja a 720p y luego a 480p automáticamente.
+const TIER_1080P = {
+  label: '1080p',
+  estKbps: 3500,
+  format: `(bv*[height<=1080][vcodec^=avc1][filesize<200M]/bv*[height<=1080][vcodec^=avc1][filesize_approx<200M]/bv*[height<=720][vcodec^=avc1][filesize<120M]/bv*[height<=720][vcodec^=avc1][filesize_approx<120M]/bv*[height<=480][vcodec^=avc1])+${AUDIO_SEL}/b[height<=1080][vcodec^=avc1]/b[height<=720][vcodec^=avc1]/b[height<=480][vcodec^=avc1]`,
+}
+const TIER_720P = {
+  label: '720p',
+  estKbps: 1900,
+  format: `(bv*[height<=720][vcodec^=avc1][filesize<120M]/bv*[height<=720][vcodec^=avc1][filesize_approx<120M]/bv*[height<=480][vcodec^=avc1])+${AUDIO_SEL}/b[height<=720][vcodec^=avc1]/b[height<=480][vcodec^=avc1]`,
+}
+const TIER_480P = {
+  label: '480p',
+  estKbps: 1400,
+  format: '(bv*[height<=480][vcodec^=avc1])+(ba[ext=m4a][abr<=140]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)/b[height<=480][vcodec^=avc1]/b[height<=480]',
+}
+const TIER_360P = {
+  label: '360p',
+  estKbps: 850,
+  format: '(bv*[height<=360][vcodec^=avc1])+(ba[ext=m4a][abr<=128]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)/b[height<=360][vcodec^=avc1]/b[height<=360]',
+}
+
+// Calidad pedida por comando (`wanted`: 1080 o 720). Los videos muy largos bajan de nivel
+// para no pasar el límite de tamaño: >25 min → 480p, >40 min → 360p.
+function selectQualityTier(durationSec, wanted = 720) {
+  if (durationSec && durationSec > 2400) return TIER_360P
+  if (durationSec && durationSec > 1500) return TIER_480P
+  return wanted >= 1080 ? TIER_1080P : TIER_720P
 }
 
 async function probeVideoFile(filePath) {
@@ -1186,15 +1192,18 @@ function formatBytes(bytes = 0) {
 }
 
 export default {
-  command: ['play2', 'mp4', 'ytmp4', 'ytvideo', 'playvideo', 'ytmp4doc'],
+  command: ['play2', 'playvideo', 'mp4', 'ytmp4', 'ytvideo', 'ytmp4doc'],
   category: 'downloads',
-  description: 'Descarga el video de YouTube. Uso: `play2 <nombre o enlace>. `ytmp4doc` lo envía como documento en 720p con la portada JPG.',
+  description: 'Descarga el video de YouTube. `play2` en 720p; `ytmp4` en 1080p; `ytmp4doc` en 1080p como documento con la portada JPG.',
   run: async ({ msg, sock, args, usedPrefix, command }) => {
-    const docMode = String(command || '').toLowerCase() === 'ytmp4doc'
+    const cmdName = String(command || '').toLowerCase()
+    const docMode = cmdName === 'ytmp4doc'
+    const wantedHeight = (docMode || ['mp4', 'ytmp4', 'ytvideo'].includes(cmdName)) ? 1080 : 720
+    const usedName = docMode ? 'ytmp4doc' : (wantedHeight === 1080 ? 'ytmp4' : 'play2')
     const quotedUrl = !args?.[0] ? extractYTUrlFromText(msg.quoted?.text || msg.quoted?.body || '') : null
     const input = (args?.join(' ').trim() || quotedUrl || '').trim()
     if (!input) {
-      return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}${docMode ? 'ytmp4doc' : 'play2'} <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}${docMode ? 'ytmp4doc' : 'play2'} despacito_`)
+      return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}${usedName} <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}${usedName} despacito_`)
     }
 
     await logPlay('play2 inicio:', input.slice(0, 100))
@@ -1214,7 +1223,7 @@ export default {
       const title = meta.title || 'video'
       const fileName = `${sanitizeFileName(title)}.mp4`
       const metaDurationSec = meta.durationSec ?? parseDurationSeconds(meta.duration)
-      const tier = docMode ? DOC_TIER_720P : selectQualityTier(metaDurationSec)
+      const tier = selectQualityTier(metaDurationSec, wantedHeight)
 
       // La portada de YouTube solo se usa en la tarjeta de info; el video usa un fotograma propio.
       const thumbBundlePromise = (meta.title || docMode) ? prepareThumbBundle(videoId, meta.thumbnail) : Promise.resolve(null)
@@ -1310,7 +1319,7 @@ export default {
             thumbnailHeight: docThumb.height,
           } : {}),
         }, { ...sendOptions, mediaUploadTimeoutMs: 420000 })
-        await logPlay('video enviado OK:', fileName, docMode ? '(documento 720p)' : '(documento, +50 MB)')
+        await logPlay('video enviado OK:', fileName, docMode ? `(documento ${tier.label})` : '(documento, +50 MB)')
       } else {
         let sentAsVideo = false
         let lastError = null

@@ -867,7 +867,7 @@ async function getVideoStats(url) {
 
 // Normaliza cualquier audio descargado (m4a, webm, opus, mp4) a M4A (AAC-LC)
 // compatible con WhatsApp en Android e iOS, con faststart y metadatos/portada JPEG.
-async function finalizeAudioM4a(inputPath, tmpDir, { title, channel, coverBuffer, targetBitrateKbps = 128 }) {
+async function finalizeAudioM4a(inputPath, tmpDir, { title, channel, coverBuffer, targetBitrateKbps = 128, best = false }) {
   const probed = await probeAudioInfo(inputPath)
   const canCopyAudio = probed.acodec === 'aac' && !probed.hasVideo && path.extname(inputPath).toLowerCase() === '.m4a'
   const outPath = path.join(tmpDir, 'final-audio.m4a')
@@ -889,7 +889,7 @@ async function finalizeAudioM4a(inputPath, tmpDir, { title, channel, coverBuffer
     if (canCopyAudio) {
       args.push('-c:a', 'copy')
     } else {
-      args.push('-c:a', 'aac', '-b:a', `${targetBitrateKbps}k`, '-ar', '44100')
+      args.push('-c:a', 'aac', '-b:a', `${targetBitrateKbps}k`, '-ar', best ? '48000' : '44100')
     }
     if (withCover) {
       args.push(
@@ -926,10 +926,13 @@ async function finalizeAudioM4a(inputPath, tmpDir, { title, channel, coverBuffer
   }
 }
 
-async function downloadWithYtDlp(ytdlp, url, attemptDir, extraArgs, { targetBitrateKbps, signal }) {
+async function downloadWithYtDlp(ytdlp, url, attemptDir, extraArgs, { targetBitrateKbps, signal, best = false }) {
   const outTemplate = path.join(attemptDir, 'audio.%(ext)s')
   const cookies = await cookieArgs()
-  const formatSelector = targetBitrateKbps <= 96
+  // Modo mejor calidad: el mejor stream de audio que ofrezca YouTube (Opus ~160k o M4A de mayor bitrate).
+  const formatSelector = best
+    ? 'ba/b[height<=360]'
+    : targetBitrateKbps <= 96
     ? 'ba[ext=m4a][abr<=96]/ba[abr<=96]/ba[ext=m4a][abr<=128]/ba[ext=m4a]/ba/b[height<=360]'
     : 'ba[ext=m4a][abr<=140]/ba[ext=m4a]/ba[acodec^=mp4a]/ba/b[height<=360]'
 
@@ -1060,10 +1063,13 @@ function mimeFor(ext) {
   return 'audio/mp4'
 }
 
-async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal, voice = false }) {
+async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal, voice = false, best = false }) {
   const errors = []
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rembot-play-'))
-  const targetBitrateKbps = durationSec && durationSec > 3000 ? 96 : 128
+  // En modo mejor calidad: AAC hasta 256 kbps, ajustado para que el archivo no pase de ~58 MB.
+  const targetBitrateKbps = best
+    ? (durationSec && durationSec > 0 ? Math.max(96, Math.min(256, Math.floor(58 * 8192 / durationSec))) : 192)
+    : (durationSec && durationSec > 3000 ? 96 : 128)
   await logPlay('getAudio inicio:', url, `(${targetBitrateKbps}kbps)`)
 
   let rawAudioPath = null
@@ -1086,7 +1092,7 @@ async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, 
         const attemptDir = path.join(tmpDir, `attempt-${i}`)
         await fs.mkdir(attemptDir, { recursive: true })
         try {
-          rawAudioPath = await downloadWithYtDlp(ytdlp, url, attemptDir, extraArgs, { targetBitrateKbps, signal })
+          rawAudioPath = await downloadWithYtDlp(ytdlp, url, attemptDir, extraArgs, { targetBitrateKbps, signal, best })
           await logPlay(`yt-dlp ${clientName} OK:`, path.basename(rawAudioPath))
         } catch (error) {
           errors.push(`${clientName}: ${error.message}`)
@@ -1125,6 +1131,7 @@ async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, 
       channel: channel || 'YouTube',
       coverBuffer: thumbBundle?.coverBuffer || null,
       targetBitrateKbps,
+      best,
     })
 
     if (finalized.size > MAX_AUDIO_SIZE) {
@@ -1169,12 +1176,13 @@ async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, 
 export default {
   command: ['play', 'mp3', 'ytmp3', 'ytaudio', 'playaudio', 'ytmp3doc'],
   category: 'downloads',
-  description: 'Descarga el audio de un video de YouTube. Uso: `play <nombre o enlace>. `playaudio` lo envía como nota de audio sin ondas y `ytmp3doc` como documento.',
+  description: 'Descarga el audio de un video de YouTube. Uso: `play <nombre o enlace>. `ytmp3` y `ytmp3doc` (documento) usan la mejor calidad; `playaudio` envía una nota de audio sin ondas.',
   run: async ({ msg, sock, args, usedPrefix, command }) => {
     const cmdName = String(command || '').toLowerCase()
     const voiceMode = cmdName === 'playaudio'
+    const bestMode = ['mp3', 'ytmp3', 'ytaudio', 'ytmp3doc'].includes(cmdName)
     const docMode = cmdName === 'ytmp3doc'
-    const usedName = voiceMode ? 'playaudio' : docMode ? 'ytmp3doc' : 'play'
+    const usedName = voiceMode ? 'playaudio' : docMode ? 'ytmp3doc' : (bestMode ? 'ytmp3' : 'play')
     const quotedUrl = !args?.[0] ? extractYTUrlFromText(msg.quoted?.text || msg.quoted?.body || '') : null
     const input = (args?.join(' ').trim() || quotedUrl || '').trim()
     if (!input) {
@@ -1209,7 +1217,9 @@ export default {
           const rawThumb = info.image || info.thumbnail || null
           channel = info.author?.name || info.author || 'YouTube'
           durationSec = info.durationSec ?? parseDurationSeconds(info.timestamp)
-          const bitrateLabel = durationSec && durationSec > 3000 ? 96 : 128
+          const bitrateLabel = bestMode
+            ? (durationSec && durationSec > 0 ? Math.max(96, Math.min(256, Math.floor(58 * 8192 / durationSec))) : 192)
+            : (durationSec && durationSec > 3000 ? 96 : 128)
           const sizeMB = durationSec ? (bitrateLabel * durationSec / 8 / 1024).toFixed(2) : null
 
           thumbBundlePromise = prepareThumbBundle(videoId || getVideoId(url), rawThumb)
@@ -1273,7 +1283,7 @@ export default {
       }
 
       const audio = await withTimeout(
-        getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal: abortController.signal, voice: voiceMode }),
+        getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal: abortController.signal, voice: voiceMode, best: bestMode }),
         240000,
         'La descarga del audio tardó demasiado (4 min). Prueba con otro video o más tarde.',
         () => abortController.abort(),

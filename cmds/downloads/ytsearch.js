@@ -4,6 +4,7 @@
 // optimizado para WhatsApp.
 
 import yts from 'yt-search'
+import { proto, generateWAMessageFromContent, prepareWAMessageMedia } from 'baileys'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createRequire } from 'node:module'
@@ -628,6 +629,73 @@ function formatChannel(v) {
   return `✐ *${v.name}${badge}*\n> ♥ sᴜsᴄʀɪᴘᴛᴏʀᴇs » *${v.subCountLabel || v.subCount || 'Desconocidos'}*${v.videoCount ? `\n> ❀ ᴠɪᴅᴇᴏs » *${v.videoCount}*` : ''}\n> 🜸 ʟɪɴᴋ » _${v.url}_`
 }
 
+const clip = (text, max) => {
+  const t = String(text || '').replace(/\s+/g, ' ').trim()
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t
+}
+
+// Menú nativo de WhatsApp (lista desplegable) con los resultados: al elegir una opción,
+// WhatsApp responde con el id `<prefijo><comando> <enlace>` y el bot descarga automáticamente.
+async function sendResultsMenu({ msg, sock, videos, text, thumbBundle, prefix }) {
+  const rowFor = (v, command) => ({
+    id: `${prefix}${command} ${v.url || `https://youtu.be/${v.videoId}`}`,
+    title: clip(v.title, 72),
+    description: clip([
+      v.author?.name || v.author,
+      v.timestamp,
+      v.views != null ? `${formatViewsCompact(v.views)} vistas` : null,
+    ].filter(Boolean).join(' • '), 72),
+  })
+  const sections = [
+    { title: '🎵 Audio (mejor calidad)', rows: videos.map(v => rowFor(v, 'ytmp3')) },
+    { title: '🎬 Video 720p', rows: videos.map(v => rowFor(v, 'play2')) },
+    { title: '🎬 Video 1080p', rows: videos.map(v => rowFor(v, 'ytmp4')) },
+  ]
+
+  let header = { title: '', hasMediaAttachment: false }
+  if (thumbBundle?.cardBuffer) {
+    try {
+      const media = await prepareWAMessageMedia({ image: thumbBundle.cardBuffer }, { upload: sock.waUploadToServer })
+      header = { title: '', hasMediaAttachment: true, imageMessage: media.imageMessage }
+    } catch {}
+  }
+
+  const content = {
+    viewOnceMessage: {
+      message: {
+        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+        interactiveMessage: proto.Message.InteractiveMessage.create({
+          header: proto.Message.InteractiveMessage.Header.create(header),
+          body: proto.Message.InteractiveMessage.Body.create({ text }),
+          footer: proto.Message.InteractiveMessage.Footer.create({ text: 'Elige un resultado y se descarga automáticamente' }),
+          contextInfo: {
+            stanzaId: msg.key?.id,
+            participant: msg.sender,
+            quotedMessage: msg.message,
+            ...(msg.expiration ? { expiration: msg.expiration } : {}),
+          },
+          nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+            buttons: [{
+              name: 'single_select',
+              buttonParamsJson: JSON.stringify({ title: 'Seleccionar resultado', sections }),
+            }],
+            messageParamsJson: '',
+          }),
+        }),
+      },
+    },
+  }
+
+  const waMsg = generateWAMessageFromContent(msg.chat, content, { userJid: sock.user?.id })
+  const biz = {
+    tag: 'biz',
+    attrs: {},
+    content: [{ tag: 'interactive', attrs: { type: 'native_flow', v: '1' }, content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }] }],
+  }
+  const additionalNodes = msg.isGroup ? [biz] : [biz, { tag: 'bot', attrs: { biz_bot: '1' } }]
+  await sock.relayMessage(msg.chat, waMsg.message, { messageId: waMsg.key.id, additionalNodes })
+}
+
 export default {
   command: ['ytsearch', 'yts', 'search'],
   category: 'downloads',
@@ -759,6 +827,22 @@ export default {
       const thumbBundle = (videoId || thumbUrl) ? await prepareThumbBundle(videoId, thumbUrl) : null
 
       const sendOpts = { quoted: msg, ephemeralExpiration: msg.expiration }
+
+      // Lista con botones: cada video se puede bajar como audio, video 720p o video 1080p.
+      const menuVideos = orderedResults.filter(v => v.type === 'video' && v.videoId).slice(0, 10)
+      if (menuVideos.length) {
+        try {
+          const menuBody = `*「✦」 𝗬𝗢𝗨𝗧𝗨𝗕𝗘 • 𝗕𝗨́𝗦𝗤𝗨𝗘𝗗𝗔*\n> ✐ ʙúsǫᴜᴇᴅᴀ » *${clip(rawQuery, 60)}*\n\n${menuVideos
+            .map((v, i) => `${i + 1}. *${clip(v.title, 60)}*\n> ${clip(v.author?.name || v.author || 'YouTube', 30)}${v.isArtist ? ' ♪' : (v.isVerified ? ' ✓' : '')} │ ${v.timestamp || '--:--'}`)
+            .join('\n\n')}`
+          await sendResultsMenu({ msg, sock, videos: menuVideos, text: menuBody, thumbBundle, prefix: usedPrefix || '.' })
+          await msg.react?.('✅').catch(() => {})
+          return
+        } catch (error) {
+          console.error('[ytsearch] no pude enviar el menú, mando texto:', error?.message || error)
+        }
+      }
+
       if (thumbBundle?.cardBuffer) {
         await sock.sendMessage(msg.chat, {
           image: thumbBundle.cardBuffer,

@@ -275,6 +275,37 @@ async function prepareThumbBundle(videoId, rawThumb) {
   return processThumbBuffer(raw)
 }
 
+// Miniatura "HD" para documentos: la tarjeta del documento en WhatsApp se ve en un cuadro más grande
+// que la de un video, así que se usa el JPG de la portada a 256 px (baseline 4:2:0, <=24 KB).
+// Sigue por debajo de los ~300 px a partir de los cuales Android/iOS descartan el jpegThumbnail.
+const WA_DOC_THUMB_MAX_EDGE = 256
+const WA_DOC_THUMB_MAX_BYTES = 24 * 1024
+
+async function buildDocumentThumb(thumbBundle) {
+  if (thumbBundle?.cardBuffer) {
+    const sharp = await loadSharp()
+    if (sharp) {
+      try {
+        const dims = fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_DOC_THUMB_MAX_EDGE)
+        for (const quality of [84, 76, 66, 56]) {
+          const buffer = await sharp(thumbBundle.cardBuffer)
+            .resize({ width: dims.width, height: dims.height, fit: 'cover', position: 'centre', kernel: 'lanczos3' })
+            .sharpen(0.4)
+            .jpeg({ quality, progressive: false, mozjpeg: false, chromaSubsampling: '4:2:0' })
+            .toBuffer()
+          if (buffer.length && buffer.length <= WA_DOC_THUMB_MAX_BYTES) {
+            return { buffer, width: dims.width, height: dims.height }
+          }
+        }
+      } catch {}
+    }
+  }
+  if (thumbBundle?.microBuffer) {
+    return { buffer: thumbBundle.microBuffer, ...fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_MICRO_THUMB_MAX_EDGE) }
+  }
+  return null
+}
+
 // Genera el jpegThumbnail del VIDEO (videoMessage / documentMessage) como lo hace WhatsApp:
 // a partir de un fotograma real del propio MP4, NUNCA de la portada de YouTube de la tarjeta.
 // - Toma un fotograma cercano al inicio y, si es negro/vacío (fundido inicial), reintenta más adentro.
@@ -1028,6 +1059,32 @@ async function ensureWhatsAppMp4(filePath, tmpDir, signal) {
   return { filePath: normalizedPath, size: st.size, ...updated }
 }
 
+// Resuelve (sin descargar) qué formato elegirá yt-dlp y cuánto pesará de verdad,
+// para que la ficha muestre la resolución y el peso reales y no una estimación.
+async function resolveFormatInfo(url, tier, signal) {
+  try {
+    const ytdlp = await ensureYtDlp()
+    const cookies = await cookieArgs()
+    const { stdout } = await execFileAsync(ytdlp, [
+      '-f', tier.format,
+      '--print', '%(height)s|%(filesize)s|%(filesize_approx)s',
+      '--skip-download', '--js-runtimes', 'node',
+      '--no-playlist', '--no-warnings', '--geo-bypass',
+      '--socket-timeout', '15', '--retries', '1',
+      ...ffmpegLocationArgs(),
+      ...cookies,
+      url,
+    ], { timeout: 20000, maxBuffer: 2 * 1024 * 1024, signal })
+    const line = String(stdout).trim().split('\n').pop() || ''
+    const [h, size, approx] = line.split('|')
+    const height = Number(h) || null
+    const bytes = Number(size) || Number(approx) || null
+    return { height, bytes }
+  } catch {
+    return null
+  }
+}
+
 async function downloadWithYtDlp(ytdlp, url, attemptDir, format, extraArgs = [], signal) {
   const outTemplate = path.join(attemptDir, 'video.%(ext)s')
   const cookies = await cookieArgs()
@@ -1227,6 +1284,7 @@ export default {
 
       // La portada de YouTube solo se usa en la tarjeta de info; el video usa un fotograma propio.
       const thumbBundlePromise = (meta.title || docMode) ? prepareThumbBundle(videoId, meta.thumbnail) : Promise.resolve(null)
+      const formatInfoPromise = resolveFormatInfo(url, tier, abortController.signal)
       const videoPromise = withTimeout(
         getVideo(url, { tier, signal: abortController.signal }),
         480000,
@@ -1242,15 +1300,21 @@ export default {
 
         cardPromise = (async () => {
           try {
-            const [thumbBundle, stats] = await Promise.all([
+            const [thumbBundle, stats, formatInfo] = await Promise.all([
               thumbBundlePromise,
               withTimeout(statsPromise, 10000, 'stats').catch(() => ({ views: null, timestamp: null })),
+              withTimeout(formatInfoPromise, 15000, 'formato').catch(() => null),
             ])
             const views = stats.views ?? meta.views
             const lanzamiento = stats.timestamp ? relativeTimeEs(stats.timestamp) : agoToEs(meta.ago)
-            const sizeMB = metaDurationSec ? (tier.estKbps * metaDurationSec / 8 / 1024).toFixed(2) : null
+            // Resolución y peso reales del formato que se va a descargar; si no se pudieron
+            // resolver, se usa la estimación por bitrate (con "~").
+            const realSizeMB = formatInfo?.bytes ? (formatInfo.bytes / 1024 / 1024).toFixed(2) : null
+            const estSizeMB = metaDurationSec ? (tier.estKbps * metaDurationSec / 8 / 1024).toFixed(2) : null
+            const sizeLabel = realSizeMB ? `${realSizeMB} MB` : (estSizeMB ? `~${estSizeMB} MB` : null)
+            const resLabel = formatInfo?.height ? `${formatInfo.height}p` : tier.label
             const durationText = meta.duration || (metaDurationSec ? formatDuration(metaDurationSec) : 'Desconocida')
-            const infoMessage = `*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ❀ ᴛíᴛᴜʟᴏ » *${title}*\n> ✐ ᴄᴀɴᴀʟ » *${meta.channel || 'Desconocido'}*\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${durationText}* │ ✧ *${views != null ? formatViewsCompact(views) : 'Desconocido'}* vistas\n> ✰ ʀᴇsᴏʟᴜᴄɪóɴ » *${tier.label}* │ ❒ *${sizeMB ? `~${sizeMB} MB` : 'Desconocido'}*\n> ⊞ ʟᴀɴᴢᴀᴍɪᴇɴᴛᴏ » *${lanzamiento || 'Desconocido'}*\n> 🜸 ʟɪɴᴋ » _${url}_`
+            const infoMessage = `*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ❀ ᴛíᴛᴜʟᴏ » *${title}*\n> ✐ ᴄᴀɴᴀʟ » *${meta.channel || 'Desconocido'}*\n> ⴵ ᴅᴜʀᴀᴄɪóɴ » *${durationText}* │ ✧ *${views != null ? formatViewsCompact(views) : 'Desconocido'}* vistas\n> ✰ ʀᴇsᴏʟᴜᴄɪóɴ » *${resLabel}* │ ❒ *${sizeLabel || 'Desconocido'}*\n> ⊞ ʟᴀɴᴢᴀᴍɪᴇɴᴛᴏ » *${lanzamiento || 'Desconocido'}*\n> 🜸 ʟɪɴᴋ » _${url}_`
 
             const sendOpts = { quoted: msg, ephemeralExpiration: msg.expiration }
             if (thumbBundle?.cardBuffer) {
@@ -1287,9 +1351,7 @@ export default {
 
       // En documento se usa el JPG de la portada (thumbnail de YouTube); en video, el fotograma del MP4.
       const thumbBundle = await thumbBundlePromise.catch(() => null)
-      const docThumb = thumbBundle?.microBuffer
-        ? { buffer: thumbBundle.microBuffer, ...fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_MICRO_THUMB_MAX_EDGE) }
-        : waThumb
+      const docThumb = (await buildDocumentThumb(thumbBundle)) || waThumb
 
       const sizeText = formatBytes(video.size)
       const sendAsDocument = docMode || video.size > MAX_VIDEO_SIZE

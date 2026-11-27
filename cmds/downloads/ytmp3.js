@@ -266,6 +266,37 @@ async function processThumbBuffer(rawBuffer) {
   }
 }
 
+// Miniatura "HD" para documentos: la tarjeta del documento en WhatsApp se ve en un cuadro más grande
+// que la de un video, así que se usa el JPG de la portada a 256 px (baseline 4:2:0, <=24 KB).
+// Sigue por debajo de los ~300 px a partir de los cuales Android/iOS descartan el jpegThumbnail.
+const WA_DOC_THUMB_MAX_EDGE = 256
+const WA_DOC_THUMB_MAX_BYTES = 24 * 1024
+
+async function buildDocumentThumb(thumbBundle) {
+  if (thumbBundle?.cardBuffer) {
+    const sharp = await loadSharp()
+    if (sharp) {
+      try {
+        const dims = fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_DOC_THUMB_MAX_EDGE)
+        for (const quality of [84, 76, 66, 56]) {
+          const buffer = await sharp(thumbBundle.cardBuffer)
+            .resize({ width: dims.width, height: dims.height, fit: 'cover', position: 'centre', kernel: 'lanczos3' })
+            .sharpen(0.4)
+            .jpeg({ quality, progressive: false, mozjpeg: false, chromaSubsampling: '4:2:0' })
+            .toBuffer()
+          if (buffer.length && buffer.length <= WA_DOC_THUMB_MAX_BYTES) {
+            return { buffer, width: dims.width, height: dims.height }
+          }
+        }
+      } catch {}
+    }
+  }
+  if (thumbBundle?.microBuffer) {
+    return { buffer: thumbBundle.microBuffer, ...fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_MICRO_THUMB_MAX_EDGE) }
+  }
+  return null
+}
+
 async function prepareThumbBundle(videoId, rawThumb) {
   const raw = await fetchRawThumbnail(buildThumbCandidates(videoId, rawThumb))
   if (!raw) return null
@@ -1310,15 +1341,15 @@ export default {
       } else if (docMode) {
         // Documento con el JPG de la portada como miniatura.
         const thumbBundle = await Promise.resolve(thumbBundlePromise).catch(() => null)
-        const docDims = thumbBundle?.microBuffer ? fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_MICRO_THUMB_MAX_EDGE) : null
+        const docThumb = await buildDocumentThumb(thumbBundle)
         await sock.sendMessage(msg.chat, {
           document: audio.buffer,
           fileName: audio.name,
           mimetype: mimeFor(audio.ext),
-          ...(docDims ? {
-            jpegThumbnail: thumbBundle.microBuffer,
-            thumbnailWidth: docDims.width,
-            thumbnailHeight: docDims.height,
+          ...(docThumb ? {
+            jpegThumbnail: docThumb.buffer,
+            thumbnailWidth: docThumb.width,
+            thumbnailHeight: docThumb.height,
           } : {}),
         }, sendOptions)
       } else {

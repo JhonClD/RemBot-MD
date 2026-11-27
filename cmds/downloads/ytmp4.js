@@ -275,65 +275,70 @@ async function prepareThumbBundle(videoId, rawThumb) {
   return processThumbBuffer(raw)
 }
 
-// Genera el jpegThumbnail exacto para videoMessage y documentMessage de WhatsApp:
-// - Respeta la proporción exacta del video real (ej. 96x54 en 16:9 o 54x96 en Shorts 9:16).
-// - Mantiene el lado mayor <=96px y formato JPEG baseline YUV 4:2:0 (<8 KB), que es el
-//   límite real de WhatsApp Android/iOS para mostrar miniaturas antes de descargar
-//   (sustituyendo el cuadro negro de 32x18 en 00:00:00 que generaba Baileys por defecto).
-// - Si no hubo portada de YouTube, extrae un fotograma representativo no negro del MP4.
-async function buildVideoWaThumbnail(videoPath, tmpDir, { width, height, durationSec, thumbBundle }) {
+// Genera el jpegThumbnail del VIDEO (videoMessage / documentMessage) como lo hace WhatsApp:
+// a partir de un fotograma real del propio MP4, NUNCA de la portada de YouTube de la tarjeta.
+// - Toma un fotograma cercano al inicio y, si es negro/vacío (fundido inicial), reintenta más adentro.
+// - Respeta la proporción exacta del video (ej. 100x56 en 16:9 o 56x100 en Shorts 9:16).
+// - JPEG baseline 4:2:0 con lado mayor <=WA_MICRO_THUMB_MAX_EDGE y <8 KB (límite de Android/iOS).
+async function buildVideoWaThumbnail(videoPath, tmpDir, { width, height, durationSec }) {
   const target = fitMaxEdge(width || 854, height || 480, WA_MICRO_THUMB_MAX_EDGE)
   const sharp = await loadSharp()
+  const dur = Number(durationSec) > 0 ? Number(durationSec) : 0
 
-  if (thumbBundle?.cardBuffer && sharp) {
+  const seeks = dur > 3
+    ? [
+        { ss: Math.min(1, dur * 0.1), pick: 12 },
+        { ss: Math.min(Math.max(2, dur * 0.2), 15), pick: 30 },
+        { ss: Math.min(Math.max(4, dur * 0.4), 40), pick: 30 },
+      ]
+    : [{ ss: 0, pick: 8 }]
+
+  let attemptIdx = 0
+  let lastBuffer = null
+  for (const { ss, pick } of seeks) {
+    attemptIdx += 1
     try {
-      let buffer = await sharp(thumbBundle.cardBuffer)
-        .resize({ width: target.width, height: target.height, fit: 'cover', position: 'centre', kernel: 'lanczos3' })
-        .sharpen(0.5)
-        .jpeg({ quality: 76, progressive: false, mozjpeg: false, chromaSubsampling: '4:2:0' })
-        .toBuffer()
-      if (buffer.length > WA_MICRO_THUMB_MAX_BYTES) {
-        buffer = await sharp(thumbBundle.cardBuffer)
-          .resize({ width: target.width, height: target.height, fit: 'cover', position: 'centre', kernel: 'lanczos3' })
-          .jpeg({ quality: 58, progressive: false, mozjpeg: false, chromaSubsampling: '4:2:0' })
+      const frame = path.join(tmpDir, `wa-frame-${attemptIdx}.jpg`)
+      await execFileAsync(FFMPEG_BIN, [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        ...(ss > 0 ? ['-ss', ss.toFixed(2)] : []),
+        '-i', videoPath,
+        '-vf', `thumbnail=${pick},scale='min(640,iw)':-2:flags=lanczos,format=yuvj420p`,
+        '-frames:v', '1', '-update', '1', '-q:v', '3', frame,
+      ], { timeout: 20000 })
+      const frameBuf = await fs.readFile(frame)
+      if (!frameBuf?.length) continue
+
+      if (sharp) {
+        const stats = await sharp(frameBuf).stats()
+        const mean = stats.channels.slice(0, 3).reduce((a, c) => a + c.mean, 0) / 3
+        const dev = stats.channels.slice(0, 3).reduce((a, c) => a + c.stdev, 0) / 3
+        const blank = mean < 14 || dev < 6
+        const make = quality => sharp(frameBuf)
+          .resize({ width: target.width, height: target.height, fit: 'fill', kernel: 'lanczos3' })
+          .sharpen(0.45)
+          .jpeg({ quality, progressive: false, mozjpeg: false, chromaSubsampling: '4:2:0' })
           .toBuffer()
-      }
-      if (buffer.length > 0 && buffer.length <= WA_MICRO_THUMB_MAX_BYTES) {
-        return { buffer, width: target.width, height: target.height }
+        let buffer = await make(78)
+        if (buffer.length > WA_MICRO_THUMB_MAX_BYTES) buffer = await make(58)
+        if (!buffer.length || buffer.length > WA_MICRO_THUMB_MAX_BYTES) continue
+        lastBuffer = { buffer, width: target.width, height: target.height }
+        if (!blank) return lastBuffer
+      } else {
+        const out = path.join(tmpDir, `wa-vthumb-${attemptIdx}.jpg`)
+        await execFileAsync(FFMPEG_BIN, [
+          '-hide_banner', '-loglevel', 'error', '-y', '-i', frame,
+          '-vf', `scale=${target.width}:${target.height}:flags=lanczos,unsharp=3:3:0.35:3:3:0.0,format=yuvj420p`,
+          '-frames:v', '1', '-update', '1', '-q:v', '5', out,
+        ], { timeout: 12000 })
+        const buffer = await fs.readFile(out)
+        if (buffer?.length && buffer.length <= WA_MICRO_THUMB_MAX_BYTES) {
+          return { buffer, width: target.width, height: target.height }
+        }
       }
     } catch {}
   }
-
-  // Extracción directa desde el MP4 (o reescalado con FFmpeg si sharp no está):
-  // salta el fundido en negro inicial (~18% de la duración, máx 12s) y elige el
-  // fotograma con mejor detalle entre 20 cuadros con el filtro `thumbnail`.
-  try {
-    const outThumb = path.join(tmpDir, 'wa-vthumb.jpg')
-    if (thumbBundle?.cardBuffer) {
-      const srcCard = path.join(tmpDir, 'wa-src-card.jpg')
-      await fs.writeFile(srcCard, thumbBundle.cardBuffer)
-      await execFileAsync(FFMPEG_BIN, [
-        '-hide_banner', '-loglevel', 'error', '-y', '-i', srcCard,
-        '-vf', `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${target.width}:${target.height},unsharp=3:3:0.35:3:3:0.0,format=yuvj420p`,
-        '-frames:v', '1', '-update', '1', '-q:v', '5', outThumb,
-      ], { timeout: 12000 })
-    } else {
-      const seekSec = durationSec && durationSec > 3 ? Math.min(Math.max(1, durationSec * 0.18), 12).toFixed(2) : '0'
-      await execFileAsync(FFMPEG_BIN, [
-        '-hide_banner', '-loglevel', 'error', '-y',
-        ...(seekSec !== '0' ? ['-ss', seekSec] : []),
-        '-i', videoPath,
-        '-vf', `thumbnail=20,scale=${target.width}:${target.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${target.width}:${target.height},unsharp=3:3:0.35:3:3:0.0,format=yuvj420p`,
-        '-frames:v', '1', '-update', '1', '-q:v', '5', outThumb,
-      ], { timeout: 15000 })
-    }
-    const buffer = await fs.readFile(outThumb)
-    if (buffer?.length && buffer.length <= WA_MICRO_THUMB_MAX_BYTES) {
-      return { buffer, width: target.width, height: target.height }
-    }
-  } catch {}
-
-  return null
+  return lastBuffer
 }
 
 const ROMAN_MAP = { ii: '2', iii: '3', iv: '4', vi: '6', vii: '7', viii: '8', ix: '9', xi: '11', xii: '12' }
@@ -1209,8 +1214,8 @@ export default {
       const metaDurationSec = meta.durationSec ?? parseDurationSeconds(meta.duration)
       const tier = selectQualityTier(metaDurationSec)
 
-      // La miniatura HD y la descarga del video arrancan en paralelo.
-      const thumbBundlePromise = prepareThumbBundle(videoId, meta.thumbnail)
+      // La portada de YouTube solo se usa en la tarjeta de info; el video usa un fotograma propio.
+      const thumbBundlePromise = meta.title ? prepareThumbBundle(videoId, meta.thumbnail) : Promise.resolve(null)
       const videoPromise = withTimeout(
         getVideo(url, { tier, signal: abortController.signal }),
         300000,
@@ -1262,14 +1267,18 @@ export default {
 
       await Promise.race([cardPromise, new Promise(resolve => setTimeout(resolve, 2500))])
 
-      const thumbBundle = await thumbBundlePromise.catch(() => null)
       const finalSeconds = video.durationSec || metaDurationSec || null
       const waThumb = await buildVideoWaThumbnail(video.filePath, tmpDir, {
         width: video.width,
         height: video.height,
         durationSec: finalSeconds,
-        thumbBundle,
       })
+
+      // En documento se usa el JPG de la portada (thumbnail de YouTube); en video, el fotograma del MP4.
+      const thumbBundle = await thumbBundlePromise.catch(() => null)
+      const docThumb = thumbBundle?.microBuffer
+        ? { buffer: thumbBundle.microBuffer, ...fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_MICRO_THUMB_MAX_EDGE) }
+        : waThumb
 
       const sizeText = formatBytes(video.size)
       const sendAsDocument = video.size > MAX_VIDEO_SIZE
@@ -1293,10 +1302,10 @@ export default {
           document: { url: video.filePath },
           mimetype: 'video/mp4',
           fileName,
-          ...(waThumb ? {
-            jpegThumbnail: waThumb.buffer,
-            thumbnailWidth: waThumb.width,
-            thumbnailHeight: waThumb.height,
+          ...(docThumb ? {
+            jpegThumbnail: docThumb.buffer,
+            thumbnailWidth: docThumb.width,
+            thumbnailHeight: docThumb.height,
           } : {}),
         }, { ...sendOptions, mediaUploadTimeoutMs: 240000 })
         await logPlay('video enviado OK:', fileName, '(documento, +50 MB)')
@@ -1325,10 +1334,10 @@ export default {
             document: { url: video.filePath },
             mimetype: 'video/mp4',
             fileName,
-            ...(waThumb ? {
-              jpegThumbnail: waThumb.buffer,
-              thumbnailWidth: waThumb.width,
-              thumbnailHeight: waThumb.height,
+            ...(docThumb ? {
+              jpegThumbnail: docThumb.buffer,
+              thumbnailWidth: docThumb.width,
+              thumbnailHeight: docThumb.height,
             } : {}),
           }, { ...sendOptions, mediaUploadTimeoutMs: 240000 })
         }

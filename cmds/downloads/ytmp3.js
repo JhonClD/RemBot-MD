@@ -1060,7 +1060,7 @@ function mimeFor(ext) {
   return 'audio/mp4'
 }
 
-async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal }) {
+async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal, voice = false }) {
   const errors = []
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rembot-play-'))
   const targetBitrateKbps = durationSec && durationSec > 3000 ? 96 : 128
@@ -1135,6 +1135,25 @@ async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, 
     }
 
     await logPlay(finalized.tagged ? 'metadatos incrustados (título + portada JPEG)' : 'audio normalizado a M4A')
+
+    if (voice) {
+      // Nota de audio: Opus en contenedor OGG, el formato nativo de WhatsApp para ptt.
+      const oggPath = path.join(tmpDir, 'voice.ogg')
+      await execFileAsync(FFMPEG_BIN, [
+        '-hide_banner', '-loglevel', 'error', '-y', '-i', finalized.filePath,
+        '-vn', '-map_metadata', '-1', '-c:a', 'libopus', '-b:a', '96k', '-ar', '48000',
+        '-application', 'audio', '-f', 'ogg', oggPath,
+      ], { timeout: 120000, signal })
+      const oggBuffer = await fs.readFile(oggPath)
+      if (oggBuffer.length < 1024) throw new Error('No pude convertir el audio a nota de voz.')
+      return {
+        buffer: oggBuffer,
+        ext: 'ogg',
+        seconds: finalized.seconds || durationSec || null,
+        name: `${sanitizeFileName(title)}.ogg`,
+      }
+    }
+
     const buffer = await fs.readFile(finalized.filePath)
     return {
       buffer,
@@ -1148,14 +1167,18 @@ async function getAudio(url, { title, channel, durationSec, thumbBundlePromise, 
 }
 
 export default {
-  command: ['play', 'mp3', 'ytmp3', 'ytaudio', 'playaudio'],
+  command: ['play', 'mp3', 'ytmp3', 'ytaudio', 'playaudio', 'ytmp3doc'],
   category: 'downloads',
-  description: 'Descarga el audio de un video de YouTube. Uso: `play <nombre o enlace>.',
-  run: async ({ msg, sock, args, usedPrefix }) => {
+  description: 'Descarga el audio de un video de YouTube. Uso: `play <nombre o enlace>. `playaudio` lo envía como nota de audio sin ondas y `ytmp3doc` como documento.',
+  run: async ({ msg, sock, args, usedPrefix, command }) => {
+    const cmdName = String(command || '').toLowerCase()
+    const voiceMode = cmdName === 'playaudio'
+    const docMode = cmdName === 'ytmp3doc'
+    const usedName = voiceMode ? 'playaudio' : docMode ? 'ytmp3doc' : 'play'
     const quotedUrl = !args?.[0] ? extractYTUrlFromText(msg.quoted?.text || msg.quoted?.body || '') : null
     const input = (args?.join(' ').trim() || quotedUrl || '').trim()
     if (!input) {
-      return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗔𝗨𝗗𝗜𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}play <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}play despacito_`)
+      return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗔𝗨𝗗𝗜𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}${usedName} <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}${usedName} despacito_`)
     }
 
     await logPlay('play inicio:', input.slice(0, 100))
@@ -1250,7 +1273,7 @@ export default {
       }
 
       const audio = await withTimeout(
-        getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal: abortController.signal }),
+        getAudio(url, { title, channel, durationSec, thumbBundlePromise, signal: abortController.signal, voice: voiceMode }),
         240000,
         'La descarga del audio tardó demasiado (4 min). Prueba con otro video o más tarde.',
         () => abortController.abort(),
@@ -1259,18 +1282,45 @@ export default {
       await Promise.race([cardPromise, new Promise(resolve => setTimeout(resolve, 2500))])
       await logPlay('audio listo, enviando:', audio.name)
 
-      // Se envía sin externalAdReply encima para mantener limpia la burbuja de audio;
-      // el título, artista y portada JPEG real van incrustados dentro del archivo M4A.
-      await sock.sendMessage(msg.chat, {
-        audio: audio.buffer,
-        fileName: audio.name,
-        mimetype: mimeFor(audio.ext),
-        ...(audio.seconds ? { seconds: audio.seconds } : {}),
-      }, {
+      const sendOptions = {
         quoted: msg,
         ephemeralExpiration: msg.expiration,
         mediaUploadTimeoutMs: 120000,
-      })
+      }
+
+      if (voiceMode) {
+        // Nota de audio de WhatsApp (ptt) con waveform vacío: burbuja de audio nativa sin las ondas.
+        await sock.sendMessage(msg.chat, {
+          audio: audio.buffer,
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true,
+          waveform: new Uint8Array(0),
+          ...(audio.seconds ? { seconds: audio.seconds } : {}),
+        }, sendOptions)
+      } else if (docMode) {
+        // Documento con el JPG de la portada como miniatura.
+        const thumbBundle = await Promise.resolve(thumbBundlePromise).catch(() => null)
+        const docDims = thumbBundle?.microBuffer ? fitMaxEdge(thumbBundle.width, thumbBundle.height, WA_MICRO_THUMB_MAX_EDGE) : null
+        await sock.sendMessage(msg.chat, {
+          document: audio.buffer,
+          fileName: audio.name,
+          mimetype: mimeFor(audio.ext),
+          ...(docDims ? {
+            jpegThumbnail: thumbBundle.microBuffer,
+            thumbnailWidth: docDims.width,
+            thumbnailHeight: docDims.height,
+          } : {}),
+        }, sendOptions)
+      } else {
+        // Se envía sin externalAdReply encima para mantener limpia la burbuja de audio;
+        // el título, artista y portada JPEG real van incrustados dentro del archivo M4A.
+        await sock.sendMessage(msg.chat, {
+          audio: audio.buffer,
+          fileName: audio.name,
+          mimetype: mimeFor(audio.ext),
+          ...(audio.seconds ? { seconds: audio.seconds } : {}),
+        }, sendOptions)
+      }
 
       await logPlay('audio enviado OK')
       await msg.react?.('✅').catch(() => {})

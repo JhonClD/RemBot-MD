@@ -39,7 +39,7 @@ const COOKIE_CANDIDATES = [
 ]
 
 const MAX_VIDEO_SIZE = 50 * 1024 * 1024 // 50 MB: por encima se envía como documento
-const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB: límite máximo del comando
+const MAX_FILE_SIZE = 250 * 1024 * 1024 // 250 MB: límite máximo del comando (1080p ≤10 min)
 const WA_MICRO_THUMB_MAX_EDGE = 96
 const WA_MICRO_THUMB_MAX_BYTES = 8 * 1024
 
@@ -925,15 +925,16 @@ async function getVideoStats(url) {
 }
 
 // Elige el nivel de calidad óptimo según la duración:
-// - Videos cortos (<=5 min): 720p HD H.264 si pesa <44 MB (con respaldo a 480p).
-// - Videos medios (5–20 min): 480p H.264.
-// - Videos largos (>20 min): 360p H.264 para no pasar el límite de 100 MB.
+// - Videos de hasta 10 min: 1080p H.264 (video <200 MB para no pasar el límite de 250 MB;
+//   si no cabe, baja a 720p y luego a 480p). Si pesa >50 MB se envía como documento.
+// - Videos medios (10–20 min): 480p H.264.
+// - Videos largos (>20 min): 360p H.264 para no pasar el límite del comando.
 function selectQualityTier(durationSec) {
-  if (durationSec && durationSec > 0 && durationSec <= 300) {
+  if (durationSec && durationSec > 0 && durationSec <= 600) {
     return {
-      label: '720p',
-      estKbps: 1900,
-      format: '(bv*[height<=720][vcodec^=avc1][filesize<44M]/bv*[height<=720][vcodec^=avc1][filesize_approx<44M]/bv*[height<=480][vcodec^=avc1])+(ba[ext=m4a][abr<=160]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)/b[height<=720][vcodec^=avc1]/b[height<=480][vcodec^=avc1]',
+      label: '1080p',
+      estKbps: 3500,
+      format: '(bv*[height<=1080][vcodec^=avc1][filesize<200M]/bv*[height<=1080][vcodec^=avc1][filesize_approx<200M]/bv*[height<=720][vcodec^=avc1][filesize<120M]/bv*[height<=720][vcodec^=avc1][filesize_approx<120M]/bv*[height<=480][vcodec^=avc1])+(ba[ext=m4a][abr<=160]/ba[ext=m4a]/ba[acodec^=mp4a]/ba)/b[height<=1080][vcodec^=avc1]/b[height<=720][vcodec^=avc1]/b[height<=480][vcodec^=avc1]',
     }
   }
   if (durationSec && durationSec > 1200) {
@@ -1055,7 +1056,7 @@ async function downloadWithYtDlp(ytdlp, url, attemptDir, format, extraArgs = [],
   const stat = await fs.stat(filePath)
   if (stat.size < 1024) throw new Error('yt-dlp dejó un archivo de video incompleto.')
   if (stat.size > MAX_FILE_SIZE) {
-    throw new Error(`El video pesa ${(stat.size / 1024 / 1024).toFixed(1)} MB, más del límite de 100 MB.`)
+    throw new Error(`El video pesa ${(stat.size / 1024 / 1024).toFixed(1)} MB, más del límite de 250 MB.`)
   }
   return { filePath, size: stat.size }
 }
@@ -1096,7 +1097,7 @@ async function getVideo(url, { tier, signal }) {
 
     const ready = await ensureWhatsAppMp4(rawVideo.filePath, tmpDir, signal)
     if (ready.size > MAX_FILE_SIZE) {
-      throw new Error(`El video pesa ${(ready.size / 1024 / 1024).toFixed(1)} MB, más del límite de 100 MB.`)
+      throw new Error(`El video pesa ${(ready.size / 1024 / 1024).toFixed(1)} MB, más del límite de 250 MB.`)
     }
     return { ...ready, tmpDir }
   } catch (error) {
@@ -1185,14 +1186,15 @@ function formatBytes(bytes = 0) {
 }
 
 export default {
-  command: ['play2', 'mp4', 'ytmp4', 'ytvideo', 'playvideo'],
+  command: ['play2', 'mp4', 'ytmp4', 'ytvideo', 'playvideo', 'ytmp4doc'],
   category: 'downloads',
-  description: 'Descarga el video de YouTube. Uso: `play2 <nombre o enlace>.',
-  run: async ({ msg, sock, args, usedPrefix }) => {
+  description: 'Descarga el video de YouTube. Uso: `play2 <nombre o enlace>. `ytmp4doc` lo envía como documento en 720p con la portada JPG.',
+  run: async ({ msg, sock, args, usedPrefix, command }) => {
+    const docMode = String(command || '').toLowerCase() === 'ytmp4doc'
     const quotedUrl = !args?.[0] ? extractYTUrlFromText(msg.quoted?.text || msg.quoted?.body || '') : null
     const input = (args?.join(' ').trim() || quotedUrl || '').trim()
     if (!input) {
-      return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}play2 <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}play2 despacito_`)
+      return msg.reply(`*「✦」 𝗗𝗘𝗦𝗖𝗔𝗥𝗚𝗔𝗡𝗗𝗢 𝗩𝗜𝗗𝗘𝗢*\n> ✐ ᴜsᴏ » *${usedPrefix}${docMode ? 'ytmp4doc' : 'play2'} <nombre o enlace>*\n> ❝ ᴇᴊᴇᴍᴘʟᴏ » _${usedPrefix}${docMode ? 'ytmp4doc' : 'play2'} despacito_`)
     }
 
     await logPlay('play2 inicio:', input.slice(0, 100))
@@ -1212,14 +1214,14 @@ export default {
       const title = meta.title || 'video'
       const fileName = `${sanitizeFileName(title)}.mp4`
       const metaDurationSec = meta.durationSec ?? parseDurationSeconds(meta.duration)
-      const tier = selectQualityTier(metaDurationSec)
+      const tier = docMode ? DOC_TIER_720P : selectQualityTier(metaDurationSec)
 
       // La portada de YouTube solo se usa en la tarjeta de info; el video usa un fotograma propio.
-      const thumbBundlePromise = meta.title ? prepareThumbBundle(videoId, meta.thumbnail) : Promise.resolve(null)
+      const thumbBundlePromise = (meta.title || docMode) ? prepareThumbBundle(videoId, meta.thumbnail) : Promise.resolve(null)
       const videoPromise = withTimeout(
         getVideo(url, { tier, signal: abortController.signal }),
-        300000,
-        'La descarga del video tardó demasiado (5 min). Prueba con otro video o más tarde.',
+        480000,
+        'La descarga del video tardó demasiado (8 min). Prueba con otro video o más tarde.',
         () => abortController.abort(),
       )
 
@@ -1281,7 +1283,7 @@ export default {
         : waThumb
 
       const sizeText = formatBytes(video.size)
-      const sendAsDocument = video.size > MAX_VIDEO_SIZE
+      const sendAsDocument = docMode || video.size > MAX_VIDEO_SIZE
       await logPlay(
         'video listo, enviando:',
         fileName,
@@ -1307,8 +1309,8 @@ export default {
             thumbnailWidth: docThumb.width,
             thumbnailHeight: docThumb.height,
           } : {}),
-        }, { ...sendOptions, mediaUploadTimeoutMs: 240000 })
-        await logPlay('video enviado OK:', fileName, '(documento, +50 MB)')
+        }, { ...sendOptions, mediaUploadTimeoutMs: 420000 })
+        await logPlay('video enviado OK:', fileName, docMode ? '(documento 720p)' : '(documento, +50 MB)')
       } else {
         let sentAsVideo = false
         let lastError = null
@@ -1339,7 +1341,7 @@ export default {
               thumbnailWidth: docThumb.width,
               thumbnailHeight: docThumb.height,
             } : {}),
-          }, { ...sendOptions, mediaUploadTimeoutMs: 240000 })
+          }, { ...sendOptions, mediaUploadTimeoutMs: 420000 })
         }
         await logPlay('video enviado OK:', fileName, sentAsVideo ? '(video)' : '(documento)')
       }
